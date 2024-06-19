@@ -9,7 +9,7 @@ toc_max_heading_level: 4
 
 ### Coroutine runtime
 
-Photon's runtime is driven by a coroutine lib. Out tests show that it has the [**best 🔗**](../performance/network-performance#2-ping-pong) IO performance in the open source world by the year of 2022, even among different programing languages.
+Photon's runtime is driven by a coroutine lib. Our tests show that it has the [**best 🔗**](../performance/network-performance#2-ping-pong) IO performance in the open source world by the year of 2022, even among different programming languages.
 
 
 ### Core Features
