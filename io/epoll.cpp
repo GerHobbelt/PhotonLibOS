@@ -49,6 +49,8 @@ struct InFlightEvent {
     void* error_data;
 };
 
+const static uint32_t EVENT_RWEO = EVENT_RWE | ONE_SHOT;
+
 class EventEngineEPoll : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
 public:
     int _evfd = -1;
@@ -89,24 +91,25 @@ public:
         DEFER(fd = -1);
         return close(fd);
     }
-    int ctl(int fd, int op, uint32_t events, int no_log_errno_1 = 0,
-            int no_log_errno_2 = 0) {
+    int ctl(int fd, int op, uint32_t events,
+            int ignore_error_1 = 0, int ignore_error_2 = 0) {
         struct epoll_event ev;
         ev.events = events;  // EPOLLERR | EPOLLHUP always included
         ev.data.u64 = fd;
         int ret = epoll_ctl(_engine_fd, op, fd, &ev);
         if (ret < 0) {
             ERRNO err;
-            if (err.no != no_log_errno_1 &&
-                err.no != no_log_errno_2) {  // deleting a non-existing fd is
-                                             // considered OK
+            // some errno may be ignored, such as deleting a non-existing fd, etc.
+            if ((ignore_error_1 == 0 || ignore_error_1 != err.no) &&
+                (ignore_error_2 == 0 || ignore_error_2 != err.no)) {
                 auto events = HEX(ev.events);
                 auto data = ev.data.ptr;
                 LOG_WARN("failed to call epoll_ctl(`, `, `, {`, `})",
                          VALUE(_engine_fd), VALUE(op), VALUE(fd), VALUE(events),
                          VALUE(data), err);
+                return -err.no;
             }
-            return -err.no;
+            return 1; // error ignored
         }
         return 0;
     }
@@ -115,38 +118,51 @@ public:
     virtual int add_interest(Event e) override {
         if (e.fd < 0)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
+        if (unlikely(!e.interests))
+            return 0;
         if (unlikely((size_t)e.fd >= _inflight_events.size()))
             _inflight_events.resize(e.fd * 2);
+
+        e.interests &= EVENT_RWEO;
         auto& entry = _inflight_events[e.fd];
-        auto intersection = e.interests & entry.interests & EVENT_RWE;
-        auto data = (entry.reader_data != e.data) * EVENT_READ  |
-                    (entry.writer_data != e.data) * EVENT_WRITE |
-                    (entry.error_data  != e.data) * EVENT_ERROR ;
-        if (intersection & data)
-            LOG_ERROR_RETURN(EALREADY, -1, "conflicted interest(s)");
-
-        int ret;
-        auto eint = entry.interests;
-        auto x = (eint | e.interests) & EVENT_RWE;
-        auto events = evmap.translate_bitwisely(x);
-        if (likely(e.interests & ONE_SHOT)) {
-            events |= EPOLLONESHOT;
-            if (likely(eint & ONE_SHOT)) {
-                ret = ctl(e.fd, EPOLL_CTL_MOD, events);
-                if (unlikely(ret < 0 && errno == ENOENT))
-                    ret = ctl(e.fd, EPOLL_CTL_ADD, events);
-            } else {
-                if (eint != 0) LOG_ERROR_RETURN(EINVAL, -1, "conflicted interest(s) regarding ONE_SHOT");
-                ret = ctl(e.fd, EPOLL_CTL_ADD, events);
-            }
+        auto eint = entry.interests & EVENT_RWEO;
+        int op;
+        if (!eint) {
+            eint = e.interests;
+            op = EPOLL_CTL_ADD;
         } else {
-            auto op = (eint & EVENT_RWE) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-            ret = ctl(e.fd, op, events);
-        }
-        if (ret < 0)
-            LOG_ERROR_RETURN(0, ret, "failed to add_interest()");
+            if ((eint ^ e.interests) & ONE_SHOT)
+                LOG_ERROR_RETURN(EALREADY, -1, "conflicted ONE_SHOT flag");
+            auto intersection = e.interests & eint;
+            auto data = (entry.reader_data != e.data) * EVENT_READ  |
+                        (entry.writer_data != e.data) * EVENT_WRITE |
+                        (entry.error_data  != e.data) * EVENT_ERROR ;
+            if (intersection & data)
+                LOG_ERROR_RETURN(EALREADY, -1, "conflicted interest(s)");
 
-        entry.interests |= e.interests;
+            eint |= e.interests;
+            op = EPOLL_CTL_MOD;
+        }
+
+        auto events = evmap.translate_bitwisely(eint);
+        if (likely(eint & ONE_SHOT)) {
+            events |= EPOLLONESHOT;
+            if (likely(op == EPOLL_CTL_MOD)) {
+                // This may falsely fail with errno == ENOENT,
+                // if the fd was closed and created again.
+                // We should suppress that specific error log
+                int ret = ctl(e.fd, op, events, ENOENT);
+                if (likely(ret == 0)) goto ok;
+                // in such cases, and `EPOLL_CTL_ADD` it again.
+                else if (ret > 0) op = EPOLL_CTL_ADD;
+                else /*if (ret < 0)*/ goto fail;
+            }
+        }
+        if (ctl(e.fd, op, events) < 0) { fail:
+            LOG_ERROR_RETURN(0, -1, "failed to add_interest()");
+        }
+
+ok:     entry.interests |= eint;
         if (e.interests & EVENT_READ)  entry.reader_data = e.data;
         if (e.interests & EVENT_WRITE) entry.writer_data = e.data;
         if (e.interests & EVENT_ERROR) entry.error_data  = e.data;
@@ -158,29 +174,24 @@ public:
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
         if (unlikely(e.interests == 0)) return 0;
         auto& entry = _inflight_events[e.fd];
-        auto intersection = e.interests & entry.interests & EVENT_RWE;
+        auto eint = entry.interests & EVENT_RWEO;
+        auto intersection = e.interests & eint;
         if (intersection == 0) return 0;
 
-        int ret, op = 0;    // ^ is to flip intersected bits
-        auto x = (entry.interests ^ intersection) & EVENT_RWE;
-        if (likely(e.interests & ONE_SHOT)) {
-            // If e is ONE_SHOT, the entry must be ONE_SHOT as well
-            if (!x) {
-                ret = 0; // no need to epoll_ctl()
-            } else {
-                auto events = evmap.translate_bitwisely(x);
-                events |= EPOLLONESHOT;
-                ret = ctl(e.fd, EPOLL_CTL_MOD, events); // re-arm other interests
+        auto remain = eint ^ intersection;  // ^ is to flip intersected bits
+        if (likely(remain == ONE_SHOT)) {
+            /* no need to epoll_ctl() */
+        } else if (likely(!remain)) {
+            if (ctl(e.fd, EPOLL_CTL_DEL, 0, ENOENT) < 0) { fail:
+                LOG_ERROR_RETURN(0, -1, "failed to rm_interest()");
             }
         } else {
-            op = x ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-            auto events = evmap.translate_bitwisely(x);
-            ret = ctl(e.fd, op, events);
+            auto events = evmap.translate_bitwisely(remain);
+            if (remain & ONE_SHOT) events |= EPOLLONESHOT;
+            if (ctl(e.fd, EPOLL_CTL_MOD, events) < 0) goto fail;
         }
-        if (ret < 0)
-            LOG_ERROR_RETURN(0, ret, "failed to rm_interest()");
-                                                    // ^ is to flip intersected bits
-        entry.interests = (op == EPOLL_CTL_DEL) ? 0 : (entry.interests ^ intersection);
+
+        entry.interests ^= intersection; // ^ is to flip intersected bits
         if (intersection & EVENT_READ)  entry.reader_data = nullptr;
         if (intersection & EVENT_WRITE) entry.writer_data = nullptr;
         if (intersection & EVENT_ERROR) entry.error_data  = nullptr;
@@ -246,7 +257,7 @@ public:
             }
             if (events && (entry.interests & ONE_SHOT)) {
                 rm_interest({.fd = (int)e.data.u64,
-                             .interests = events | ONE_SHOT,
+                             .interests = events,
                              .data = nullptr});
             }
         }
@@ -289,7 +300,7 @@ public:
         if (interest & (interest-1))
             LOG_ERROR_RETURN(EINVAL, -1, "can not wait for multiple interests");
         if (unlikely(interest == 0))
-            return rm_interest({fd, EVENT_RWE, 0}); // remove fd from epoll
+            return rm_interest({fd, EVENT_RWE| ONE_SHOT, 0}); // remove fd from epoll
         int ret = add_interest({fd, interest | ONE_SHOT, CURRENT});
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
         ret = thread_usleep(timeout);
