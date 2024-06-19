@@ -47,7 +47,7 @@ namespace net {
         union {
             in6_addr addr = {};
             struct { uint16_t _1, _2, _3, _4, _5, _6; uint8_t a, b, c, d; };
-        };
+        } __attribute__((packed));
         // For compatibility, the default constructor is still 0.0.0.0 (IPv4)
         IPAddr() {
             map_v4(htonl(INADDR_ANY));
@@ -150,7 +150,8 @@ namespace net {
         uint16_t port = 0;
         EndPoint() = default;
         EndPoint(IPAddr ip, uint16_t port) : addr(ip), port(port) {}
-        explicit EndPoint(const char* s);
+        explicit EndPoint(const char* ep);
+        EndPoint(const char* ip, uint16_t port) : addr(ip), port(port) {}
         bool is_ipv4() const {
             return addr.is_ipv4();
         };
@@ -161,7 +162,7 @@ namespace net {
             return !operator==(rhs);
         }
         bool undefined() const {
-            return addr.undefined() && port == 0;
+            return addr.undefined();
         }
     };
 

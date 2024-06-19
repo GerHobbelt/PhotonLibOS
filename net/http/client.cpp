@@ -70,7 +70,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     std::string strhost(host);
     auto ipaddr = resolver->resolve(strhost.c_str());
     if (ipaddr.undefined()) {
-        LOG_ERROR_RETURN(0, nullptr, "DNS resolve failed, name = `", host)
+        LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host)
     }
 
     EndPoint ep(ipaddr, port);
@@ -79,6 +79,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     if (secure) {
         tlssock->timeout(timeout);
         sock = tlssock->connect(ep);
+        tls_stream_set_hostname(sock, strhost.c_str());
     } else {
         tcpsock->timeout(timeout);
         sock = tcpsock->connect(ep);
@@ -120,8 +121,8 @@ public:
     CommonHeaders<> m_common_headers;
     ICookieJar *m_cookie_jar;
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
-        m_cookie_jar(cookie_jar),
-        m_dialer(tls_ctx) {
+        m_dialer(tls_ctx),
+        m_cookie_jar(cookie_jar) {
     }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
@@ -167,7 +168,7 @@ public:
                      ? m_dialer.dial(m_proxy_url, tmo.timeout())
                      : m_dialer.dial(req, tmo.timeout());
         if (!s) {
-            if (errno == ECONNREFUSED) {
+            if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
             }
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "connection failed");

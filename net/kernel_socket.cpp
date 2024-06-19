@@ -1035,16 +1035,14 @@ extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
 
 /* Implementations in socket.h */
 
-EndPoint::EndPoint(const char* s) {
-    estring_view ep(s);
+EndPoint::EndPoint(const char* _ep) {
+    estring_view ep(_ep);
     auto pos = ep.find_last_of(':');
     if (pos == estring::npos)
         return;
     // Detect IPv6 or IPv4
     estring ip_str = ep[pos - 1] == ']' ? ep.substr(1, pos - 2) : ep.substr(0, pos);
     auto ip = IPAddr(ip_str.c_str());
-    if (ip.undefined())
-        return;
     auto port_str = ep.substr(pos + 1);
     if (!port_str.all_digits())
         return;

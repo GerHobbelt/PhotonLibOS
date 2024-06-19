@@ -45,8 +45,8 @@ if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${
 endif ()
 ProcessorCount(NumCPU)
 
-# Compiler options
-add_compile_options(-Wall)  # -Werror is not enable yet
+# Global compiler options, only effective within this project
+add_compile_options(-Wall -Werror -Wno-error=pragmas)
 
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,6 +60,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_BUILD_PARALLEL_LEVEL ${NumCPU})
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat")
+endif()
 
 if (${ARCH} STREQUAL x86_64)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.2")

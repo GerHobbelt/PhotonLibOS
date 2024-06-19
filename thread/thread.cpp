@@ -928,15 +928,15 @@ R"(
         size_t randomizer = (rand() % 32) * (1024 + 8);
         stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
         char* ptr = (char*)photon_thread_alloc(stack_size);
-        auto p = ptr + stack_size - sizeof(thread) - randomizer;
-        (uint64_t&)p &= ~63;
-        auto th = new (p) thread;
+        uint64_t p = (uint64_t) ptr + stack_size - sizeof(thread) - randomizer;
+        p = align_down(p, 64);
+        auto th = new((char*) p) thread;
         th->buf = ptr;
         th->stackful_alloc_top = ptr;
         th->start = start;
         th->stack_size = stack_size;
         th->arg = arg;
-        auto sp = align_down((uint64_t)p - reserved_space, 64);
+        auto sp = align_down(p - reserved_space, 64);
         th->stack.init((void*)sp, &_photon_thread_stub, th);
         AtomicRunQ arq(rq);
         th->vcpu = arq.vcpu;
@@ -1033,7 +1033,7 @@ R"(
 
     volatile uint64_t now;
     static std::atomic<pthread_t> ts_updater(0);
-    static inline uint64_t update_now()
+    static inline struct timeval update_now()
     {
 #if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
         if (likely(__mimic_vdso_time_x86))
@@ -1045,7 +1045,7 @@ R"(
         nnow *= 1000 * 1000;
         nnow += tv.tv_usec;
         now = nnow;
-        return nnow;
+        return tv;
     }
     __attribute__((always_inline))
     static inline uint32_t _rdtsc()
@@ -1070,23 +1070,28 @@ R"(
     #endif
     }
     static uint32_t last_tsc = 0;
-    static inline uint64_t if_update_now(bool accurate = false) {
+    static inline void if_update_now(bool accurate = false) {
 #if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
         if (likely(__mimic_vdso_time_x86)) {
             return photon::now = __mimic_vdso_time_x86.get_now(accurate);
         }
 #endif
         if (likely(ts_updater.load(std::memory_order_relaxed))) {
-            return photon::now;
+            return;
         }
-        if (unlikely(accurate))
-            return update_now();
+        if (unlikely(accurate)) {
+            update_now();
+            return;
+        }
         uint32_t tsc = _rdtsc();
         if (unlikely(last_tsc != tsc)) {
             last_tsc = tsc;
-            return update_now();
+            update_now();
         }
-        return photon::now;
+    }
+    struct timeval alog_update_now() {
+        last_tsc = _rdtsc();
+        return update_now();
     }
     int timestamp_updater_init() {
         if (!ts_updater) {
