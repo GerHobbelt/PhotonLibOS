@@ -43,7 +43,7 @@ function(build_from_src [dep])
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}
-                BUILD_COMMAND sh -c "V=1 CFLAGS=\"-fPIC -g -O3 -Wall -Wextra -fno-stack-protector\" $(MAKE) -C src"
+                BUILD_COMMAND sh -c "V=1 CFLAGS=\"-fPIC -O3 -Wall -Wextra -fno-stack-protector\" $(MAKE) -C src"
                 INSTALL_COMMAND $(MAKE) install
         )
         set(URING_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
@@ -87,7 +87,7 @@ function(build_from_src [dep])
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} shared
                 BUILD_COMMAND make -j 1  # https://github.com/openssl/openssl/issues/5762#issuecomment-376622684
-                INSTALL_COMMAND make install
+                INSTALL_COMMAND make -j 1 install
                 LOG_CONFIGURE ON
                 LOG_BUILD ON
                 LOG_INSTALL ON

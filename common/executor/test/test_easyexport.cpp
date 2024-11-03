@@ -15,8 +15,6 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
-
 #include <photon/fs/async_filesystem.h>
 #include <photon/fs/exportfs.h>
 #include <photon/fs/filesystem.h>
@@ -25,6 +23,7 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/common/executor/executor.h>
 #include <photon/common/executor/easyawaiter.h>
+#include "../../../test/gtest.h"
 
 using namespace photon;
 
@@ -84,7 +83,7 @@ TEST(easy_performer, test) {
     easy_atomic_set(count, 10000);
 
     std::thread([]() {
-        if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        if (ci_init_photon(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
             return -1;
         DEFER(photon::fini());
         fs::exportfs_init();

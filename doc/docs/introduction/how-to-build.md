@@ -27,7 +27,7 @@ For China mainland developers, if you are having connection issues to github, pl
   
 ```bash
 dnf install gcc-c++ cmake
-dnf install openssl-devel libcurl-devel libaio-devel
+dnf install openssl-devel libcurl-devel libaio-devel zlib-devel
 ```
 
 ```mdx-code-block
@@ -37,7 +37,7 @@ dnf install openssl-devel libcurl-devel libaio-devel
 
 ```bash
 apt install cmake
-apt install libssl-dev libcurl4-openssl-dev libaio-dev
+apt install libssl-dev libcurl4-openssl-dev libaio-dev zlib1g-dev
 ```
 
 ```mdx-code-block
@@ -46,7 +46,7 @@ apt install libssl-dev libcurl4-openssl-dev libaio-dev
 ```
 
 ```bash
-brew install cmake openssl pkg-config
+brew install cmake openssl@1.1 pkg-config
 ```
 
 ```mdx-code-block
@@ -64,7 +64,7 @@ brew install cmake openssl pkg-config
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build -j
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -75,7 +75,7 @@ cmake --build build -j
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build -j
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -85,8 +85,8 @@ cmake --build build -j
 
 ```bash
 cd PhotonLibOS
-cmake -B build
-cmake --build build -j
+cmake -B build -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -115,7 +115,7 @@ dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -133,7 +133,7 @@ apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -151,7 +151,7 @@ brew install gflags googletest gsasl
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -171,13 +171,13 @@ ctest
 |   PHOTON_BUILD_TESTING    |   OFF   |               Build examples and test code                |
 | PHOTON_BUILD_DEPENDENCIES |   OFF   | Don't find local libs, but build dependencies from source |
 |    PHOTON_CXX_STANDARD    |   14    |           Affects gcc argument of `-std=c++xx`            |
-|    PHOTON_ENABLE_URING    |   OFF   |     Enable io_uring. Will download `liburing` source      |
+|    PHOTON_ENABLE_URING    |   OFF   |           Enable io_uring. Requires `liburing`            |
 |    PHOTON_ENABLE_FUSE     |   OFF   |              Enable fuse. Requires `libfuse`              |
 |    PHOTON_ENABLE_SASL     |   OFF   |             Enable SASL. Requires `libgsasl`              |
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |          Enable F-Stack and DPDK. Requires both.          |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             Enable extfs. Requires `libe2fs`              |
 
-#### Example
+#### Case 1. Staitcally build all third-party libs
 
 Build all the dependencies from source, so you can distribute Photon binary anywhere, as long as libc and libc++ versions suffice.
 
@@ -193,4 +193,14 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_OPENSSL_SOURCE=https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz \
 -D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz \
 -D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
+```
+
+#### Case 2. Dynamically link to libcurl.so and libssl.so
+
+```bash
+cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+-D PHOTON_BUILD_DEPENDENCIES=ON \
+-D PHOTON_AIO_SOURCE=https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz \
+-D PHOTON_CURL_SOURCE="" \
+-D PHOTON_OPENSSL_SOURCE=""
 ```

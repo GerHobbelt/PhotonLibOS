@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/executor/executor.h>
 #include <photon/common/utility.h>
@@ -23,11 +22,11 @@ limitations under the License.
 #include <photon/fs/filesystem.h>
 #include <photon/fs/localfs.h>
 #include <photon/thread/thread.h>
-#include <sched.h>
-#include <immintrin.h>
+#include "../../../test/ci-tools.h"
 
 #include <chrono>
 #include <thread>
+#include "../../../test/gtest.h"
 
 using namespace photon;
 
@@ -75,11 +74,7 @@ TEST(std_executor, perf) {
     for (int i = 0; i < th_num; i++) {
         ths.emplace_back([&] {
             for (int j = 0; j < app_num; j++) {
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        CPU_SET(i, &cpuset);
-        pthread_setaffinity_np(pthread_self(),
-                                        sizeof(cpu_set_t), &cpuset);
+                photon::set_cpu_affinity(j);
                 auto start = std::chrono::high_resolution_clock::now();
                 eth.async_perform(new auto ([&] { cnt++; if (cnt % 10000 == 0) printf("%d\n", cnt);}));
                 auto end = std::chrono::high_resolution_clock::now();

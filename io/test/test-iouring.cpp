@@ -18,10 +18,7 @@ limitations under the License.
 #include <cstdlib>
 #include <fcntl.h>
 #include <unordered_map>
-
-#include <gtest/gtest.h>
 #include <gflags/gflags.h>
-
 #include <photon/io/fd-events.h>
 #include <photon/io/signal.h>
 #include <photon/fs/localfs.h>
@@ -33,6 +30,7 @@ limitations under the License.
 #include <photon/io/iouring-wrapper.h>
 #include <photon/common/alog.h>
 #include <photon/photon.h>
+#include "../../test/gtest.h"
 #include "../../test/ci-tools.h"
 
 using namespace photon;
@@ -56,11 +54,11 @@ static void handle_signal(int sig) {
     LOG_INFO("try to stop test");
     stop_test = true;
 }
-
+/*
 static void ignore_signal(int sig) {
     LOG_INFO("ignore signal `", sig);
 }
-
+*/
 static void show_qps_loop() {
     while (!stop_test) {
         photon::thread_sleep(FLAGS_show_loop_interval);
@@ -342,7 +340,8 @@ TEST(perf, DISABLED_read) {
 class event_engine : public testing::Test {
 protected:
     void SetUp() override {
-        GTEST_ASSERT_EQ(0, photon::init(ci_ev_engine, photon::INIT_IO_NONE));
+        GTEST_ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT,
+                                        photon::INIT_IO_NONE));
 #ifdef PHOTON_URING
         engine = (ci_ev_engine == photon::INIT_EVENT_EPOLL) ? photon::new_epoll_cascading_engine()
                                                           : photon::new_iouring_cascading_engine();
@@ -621,6 +620,5 @@ int main(int argc, char** arg) {
     testing::InitGoogleTest(&argc, arg);
     testing::FLAGS_gtest_break_on_failure = true;
     gflags::ParseCommandLineFlags(&argc, &arg, true);
-    ci_parse_env();
     return RUN_ALL_TESTS();
 }

@@ -5,9 +5,8 @@ toc_max_heading_level: 4
 
 # How to Integrate
 
-We recommend using CMake's `FetchContent` to integrate Photon into your existing C++ project.
-
-It will download source code from the remote repo and track along with the third-party dependencies.
+You can either use CMake's `FetchContent` to download Photon source into your existing C++ project, 
+or add this repo as a `submodule`.
 
 ### Modify your `CMakeLists.txt`
 
@@ -17,19 +16,21 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 # Suppose this is your existing project
 project(my_project)
 
-include(FetchContent)
-
 # Set some options internally used in Photon
 set(PHOTON_ENABLE_URING OFF CACHE INTERNAL "Enable iouring")
 set(PHOTON_CXX_STANDARD 14 CACHE INTERNAL "C++ standard")
 
-# Fetch Photon repo with specific tag or branch
+# 1. Fetch Photon repo with specific tag or branch
+include(FetchContent)
 FetchContent_Declare(
     photon
     GIT_REPOSITORY https://github.com/alibaba/PhotonLibOS.git
     GIT_TAG main
 )
 FetchContent_MakeAvailable(photon)
+
+# 2. Submodule
+add_subdirectory(photon)
 ```
 
 ### Case 1: Statically linking your app with Photon
