@@ -20,7 +20,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
+#include <memory>
 #include <thread>
 #include <utility>
 #ifndef __aarch64__
@@ -90,16 +90,23 @@ struct PhotonPause : PauseBase {
     }
 };
 
+template <typename T>
+struct is_shared_ptr : std::false_type {};
+template <typename T>
+struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+
 template <typename T, size_t N>
 class LockfreeRingQueueBase {
 public:
 #if __cplusplus < 201402L
-    static_assert(std::has_trivial_copy_constructor<T>::value &&
-                      std::has_trivial_copy_assign<T>::value,
+    static_assert((std::has_trivial_copy_constructor<T>::value &&
+                   std::has_trivial_copy_assign<T>::value) ||
+                      is_shared_ptr<T>::value,
                   "T should be trivially copyable");
 #else
-    static_assert(std::is_trivially_copy_constructible<T>::value &&
-                      std::is_trivially_copy_assignable<T>::value,
+    static_assert((std::is_trivially_copy_constructible<T>::value &&
+                   std::is_trivially_copy_assignable<T>::value) ||
+                      is_shared_ptr<T>::value,
                   "T should be trivially copyable");
 #endif
 
@@ -553,7 +560,8 @@ public:
         while (!push(x)) {
             Pause::pause();
         }
-        if (idler.load(std::memory_order_acquire)) queue_sem.signal(1);
+        // meke sure that idler load happends after push work done.
+        if (idler.load(std::memory_order_seq_cst)) queue_sem.signal(1);
     }
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
