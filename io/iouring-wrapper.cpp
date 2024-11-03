@@ -97,7 +97,7 @@ public:
             // reset m_ring so that the destructor won't do duplicate munmap cleanup (io_uring_queue_exit)
             delete m_ring;
             m_ring = nullptr;
-            LOG_ERRNO_RETURN(0, -1, "iouring: failed to init queue");
+            LOG_ERROR_RETURN(0, -1, "iouring: failed to init queue: ", ERRNO(-ret));
         }
 
         // Check feature supported
@@ -112,7 +112,7 @@ public:
         if (probe == nullptr) {
             LOG_ERROR_RETURN(0, -1, "iouring: failed to get probe");
         }
-        DEFER(free(probe));
+        DEFER(io_uring_free_probe(probe));
         if (!io_uring_opcode_supported(probe, IORING_OP_PROVIDE_BUFFERS) ||
             !io_uring_opcode_supported(probe, IORING_OP_ASYNC_CANCEL)) {
             LOG_ERROR_RETURN(0, -1, "iouring: some opcodes are not supported");

@@ -14,10 +14,6 @@ import TabItem from '@theme/TabItem';
 git clone https://github.com/alibaba/PhotonLibOS.git
 ```
 
-:::tip
-For China mainland developers, if you are having connection issues to github, please try the [mirror repo](https://gitee.com/mirrors/photonlibos.git).
-:::
-
 ### Install dependencies
 
 ```mdx-code-block
@@ -109,8 +105,8 @@ The examples and test code are built together.
 
 ```bash
 # Install additional dependencies
-dnf install epel-releaase
-dnf config-manager --set-enabled PowerTools
+dnf install epel-release
+dnf config-manager --set-enabled powertools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 
 # Build examples and test code
@@ -150,7 +146,7 @@ ctest
 brew install gflags googletest gsasl
 
 # Build examples and test code
-cmake -B build -D PHOTON_BUILD_TESTING=ON
+cmake -B build -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1 -D PHOTON_BUILD_TESTING=ON
 cmake --build build -j 8
 
 # Run all test cases
@@ -163,7 +159,7 @@ ctest
 </Tabs>
 ```
 
-### Build Options
+### Extra Build Options
 
 |          Option           | Default |                        Description                        |
 |:-------------------------:|:-------:|:---------------------------------------------------------:|
@@ -176,6 +172,7 @@ ctest
 |    PHOTON_ENABLE_SASL     |   OFF   |             Enable SASL. Requires `libgsasl`              |
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |          Enable F-Stack and DPDK. Requires both.          |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             Enable extfs. Requires `libe2fs`              |
+|  PHOTON_ENABLE_ECOSYSTEM  |   OFF   |            Enable ecosystem tools and wrappers            |
 
 #### Case 1. Staitcally build all third-party libs
 
