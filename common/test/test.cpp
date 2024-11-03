@@ -61,13 +61,13 @@ char str[] = "2018/01/05 21:53:28|DEBUG| 2423423|test.cpp:254|virtual void LOGPe
 
 TEST(ring, round_up_to_exp2)
 {
-    EXPECT_EQ(RingBase::round_up_to_exp2(0), 1);
-    EXPECT_EQ(RingBase::round_up_to_exp2(1), 1);
+    EXPECT_EQ(round_up_to_exp2(0), 1);
+    EXPECT_EQ(round_up_to_exp2(1), 1);
 
     uint32_t i = 2;
     for (uint32_t exp2 = 2; exp2 <= (1<<25); exp2 *= 2)
         for ((void)i; i <= exp2; ++i)
-            EXPECT_EQ(RingBase::round_up_to_exp2(i), exp2);
+            EXPECT_EQ(round_up_to_exp2(i), exp2);
 }
 
 int rq_step = 0;
@@ -1202,6 +1202,23 @@ TEST(string_key, unordered_map_string_kv) {
 TEST(string_key, unordered_map_string_kv_perf) {
     unordered_map_string_kv test_map;
     basic_map_test(test_map);
+}
+
+template<typename M> static
+void test_map_case_insensitive() {
+    M m;
+    m.emplace("asdf", "jkl;");
+    auto it = m.find("ASDF");
+    EXPECT_NE(it, m.end());
+    EXPECT_EQ(it->second, "jkl;");
+    EXPECT_EQ(m.count("kuherqf"), 0);
+}
+
+TEST(string_key, case_insensitive) {
+    test_map_case_insensitive<unordered_map_string_key_case_insensitive<estring>>();
+    test_map_case_insensitive<unordered_map_string_kv_case_insensitive>();
+    test_map_case_insensitive<map_string_key_case_insensitive<estring>>();
+    test_map_case_insensitive<map_string_kv_case_insensitive>();
 }
 
 TEST(RangeLock, Basic) {

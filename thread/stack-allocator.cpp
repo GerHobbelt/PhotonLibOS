@@ -20,6 +20,7 @@ limitations under the License.
 #include <errno.h>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
+#include <photon/thread/arch.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -27,8 +28,6 @@ limitations under the License.
 #include <vector>
 
 namespace photon {
-
-const static size_t PAGE_SIZE = getpagesize();
 
 template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
           size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024>
@@ -90,10 +89,10 @@ protected:
     };
 
     // get_slot(length) returns first slot that larger or equal to length
-    static inline uint32_t get_slot(uint32_t length) {
-        static auto base = __builtin_clz(MIN_ALLOCATION_SIZE - 1);
-        auto index = __builtin_clz(length - 1);
-        return base > index ? base - index : 0;
+    uint32_t get_slot(uint32_t length) {
+        auto index = log2_round_up(length);
+        auto base = log2_truncate(MIN_ALLOCATION_SIZE);
+        return (index <= base) ? 0 : (index - base);
     }
 
     Slot slots[N_SLOTS];

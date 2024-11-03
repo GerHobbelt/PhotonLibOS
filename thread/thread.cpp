@@ -51,6 +51,7 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
 #include <photon/common/alog.h>
 #include <photon/common/alog-functionptr.h>
 #include <photon/thread/thread-key.h>
+#include <photon/thread/arch.h>
 
 /* notes on the scheduler:
 
@@ -85,8 +86,6 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
                            ".type "#name", @function\n" \
                            #name": "
 #endif
-
-static const size_t PAGE_SIZE = getpagesize();
 
 namespace photon
 {
@@ -268,13 +267,6 @@ namespace photon
 #endif
         }
 
-        void go() {
-            assert(this == CURRENT);
-            auto _arg = arg;
-            arg = nullptr;
-            retval = start(_arg);
-            die();
-        }
         void die() __attribute__((always_inline));
         void dequeue_ready_atomic(states newstat = states::READY);
         vcpu_t* get_vcpu() {
@@ -874,9 +866,11 @@ R"(
 
 #endif  // x86 or arm
 
-    extern "C" void _photon_switch_context_defer_die(void* arg,uint64_t defer_func_addr, void** to)
-        asm ("_photon_switch_context_defer_die");
+    extern "C" __attribute__((noreturn))
+    void _photon_switch_context_defer_die(void* arg, uint64_t defer_func_addr,
+        void** to) asm ("_photon_switch_context_defer_die");
 
+    __attribute__((noreturn))
     inline void thread::die() {
         deallocate_tls(&tls);
         // if CURRENT is idle stub and during vcpu_fini
@@ -902,7 +896,7 @@ R"(
         _photon_switch_context_defer_die(
             arg, func, sw.to->stack.pointer_ref());
     }
-    __attribute__((used)) static
+    static __attribute__((used, noreturn))
     void _photon_thread_die(thread* th) {
         assert(th == CURRENT);
         th->die();
@@ -929,6 +923,8 @@ R"(
             stack_size = least_stack_size;
         }
         char* ptr = (char*)photon_thread_alloc(stack_size);
+        if (unlikely(!ptr))
+            return nullptr;
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
         auto th = new ((char*)p) thread;
@@ -1389,21 +1385,27 @@ R"(
         return (join_handle*)th;
     }
 
-    void thread_join(join_handle* jh)
-    {
+    void* thread_join(join_handle* jh) {
         auto th = (thread*)jh;
+        assert(th->is_joinable());
         if (!th->is_joinable())
-            LOG_ERROR_RETURN(ENOSYS, , "join is not enabled for thread ", th);
+            LOG_ERROR_RETURN(ENOSYS, nullptr, "join is not enabled for thread ", th);
 
         th->lock.lock();
         while (th->state != states::DONE) {
             th->cond.wait(th->lock);
         }
+        auto retval = th->retval;
         th->dispose();
+        return retval;
     }
     inline void thread_join(thread* th)
     {
         thread_join((join_handle*)th);
+    }
+    void thread_exit(void* retval) {
+        CURRENT->retval = retval;
+        _photon_thread_die(CURRENT);
     }
 
     int thread_shutdown(thread* th, bool flag)
@@ -1660,8 +1662,8 @@ R"(
         int ret = thread_usleep_defer(timeout, q, unlock, m);
         auto en = ret < 0 ? errno : 0;
         while (true) {
-            int ret = lock(m);
-            if (ret == 0) break;
+            int lock_ret = lock(m);
+            if (lock_ret == 0) break;
             LOG_ERROR("failed to get mutex lock, ` `, try again", VALUE(ret), ERRNO());
             thread_usleep(1000, nullptr);
         }
@@ -1884,6 +1886,8 @@ R"(
     }
 
     int vcpu_init() {
+        if (unlikely(PAGE_SIZE == 0))
+            PAGE_SIZE = getpagesize();
         RunQ rq;
         if (rq.current) return -1;      // re-init has no side-effect
         char* ptr = nullptr;
