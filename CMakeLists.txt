@@ -202,6 +202,9 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         rpc/*.cpp
         thread/*.cpp
         )
+if ((${ARCH} STREQUAL aarch64) OR (${ARCH} STREQUAL arm64))
+    list(APPEND PHOTON_SRC common/checksum/crc64_ecma_refl_pmull.S)
+endif ()
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
@@ -390,11 +393,12 @@ if (PHOTON_BUILD_TESTING)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
     include(generate-ctest-packed-script)
 
-    add_library(ci-tools STATIC test/ci-tools.cpp)
+    add_library(ci-tools OBJECT test/ci-tools.cpp)
     target_include_directories(ci-tools PRIVATE include)
 
     target_include_directories(photon_shared PUBLIC ${CURL_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
-    target_link_libraries(photon_shared PUBLIC ${CURL_LIBRARIES} ${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES} ci-tools)
+    target_link_libraries(photon_shared PUBLIC ${CURL_LIBRARIES} ${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES})
+    link_libraries(ci-tools)
 
     add_subdirectory(common/checksum/test)
     add_subdirectory(common/test)
