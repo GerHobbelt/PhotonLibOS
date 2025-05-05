@@ -240,6 +240,8 @@ namespace rpc {
                 COPY(func);
                 COPY(stream);
                 COPY(sk);
+                COPY(stream_serv_count);
+                COPY(stream_cv);
                 COPY(w_lock);
 #undef COPY
             }
@@ -379,14 +381,14 @@ namespace rpc {
         }
         static void* async_serve(void* args_)
         {
-            auto ctx = (Context*)args_;
-            Context context(std::move(*ctx));
-            ctx->got_it = true;
+            bool &got_it = ((Context*)args_)->got_it;
+            Context context(std::move(*(Context*)args_));
+            got_it = true;
             thread_yield();
             context.serve_request();
             // serve done, here reduce refcount
-            (*ctx->stream_serv_count) --;
-            ctx->stream_cv->notify_all();
+            (*context.stream_serv_count) --;
+            context.stream_cv->notify_all();
             return nullptr;
         }
         virtual int shutdown(bool no_more_requests) override {
@@ -425,15 +427,18 @@ namespace rpc {
 
     class StubPoolImpl : public StubPool {
     public:
-        explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout) {
+        explicit StubPoolImpl(uint64_t expiration, uint64_t timeout,
+                              std::shared_ptr<net::ISocketClient> socket_client = nullptr)
+            : m_socket_client(std::move(socket_client)) {
             tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
-            tcpclient = net::new_tcp_socket_client();
-            tcpclient->timeout(connect_timeout);
+            if (!m_socket_client) {
+                m_socket_client.reset(net::new_tcp_socket_client());
+            }
+            m_socket_client->timeout(timeout);
             m_pool = new ObjectCache<net::EndPoint, rpc::Stub*>(expiration);
         }
 
         ~StubPoolImpl() {
-            delete tcpclient;
             delete m_pool;
             delete tls_ctx;
         }
@@ -460,12 +465,12 @@ namespace rpc {
         }
 
         uint64_t get_timeout() const override {
-            return tcpclient->timeout();
+            return m_socket_client->timeout();
         }
 
     protected:
         net::ISocketStream* get_socket(const net::EndPoint& ep, bool tls) const {
-            auto sock = tcpclient->connect(ep);
+            auto sock = m_socket_client->connect(ep);
             if (!sock)
                 LOG_ERRNO_RETURN(0, nullptr, "failed to connect to ", ep);
             LOG_DEBUG("connected to ", ep);
@@ -477,7 +482,7 @@ namespace rpc {
         }
 
         ObjectCache<net::EndPoint, rpc::Stub*>* m_pool;
-        net::ISocketClient *tcpclient;
+        std::shared_ptr<net::ISocketClient> m_socket_client;
         net::TLSContext* tls_ctx = nullptr;
     };
 
@@ -486,10 +491,10 @@ namespace rpc {
     class UDSStubPoolImpl : public StubPoolImpl {
     public:
         explicit UDSStubPoolImpl(const char* path, uint64_t expiration,
-                                 uint64_t connect_timeout)
-            : StubPoolImpl(expiration, connect_timeout),
+                                 uint64_t timeout)
+            : StubPoolImpl(expiration, timeout),
               m_path(path), m_client(net::new_uds_client()) {
-                  m_client->timeout(connect_timeout);
+                  m_client->timeout(timeout);
               }
 
         ~UDSStubPoolImpl() {
@@ -514,13 +519,14 @@ namespace rpc {
         net::ISocketClient * m_client;
     };
 
-    StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout) {
-        return new StubPoolImpl(expiration, connect_timeout);
+    StubPool* new_stub_pool(uint64_t expiration, uint64_t timeout,
+                            std::shared_ptr<net::ISocketClient> socket_client) {
+        return new StubPoolImpl(expiration, timeout, std::move(socket_client));
     }
 
     StubPool* new_uds_stub_pool(const char* path, uint64_t expiration,
-                                uint64_t connect_timeout) {
-        return new UDSStubPoolImpl(path, expiration, connect_timeout);
+                                uint64_t timeout) {
+        return new UDSStubPoolImpl(path, expiration, timeout);
     }
     }  // namespace rpc
 }
