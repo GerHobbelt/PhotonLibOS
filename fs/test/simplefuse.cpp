@@ -15,7 +15,11 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <fuse/fuse_opt.h>
+#if FUSE_USE_VERSION >= 30
+#include <fuse3/fuse.h>
+#else
+#include <fuse.h>
+#endif
 #include <sys/stat.h>
 
 #include <cstdio>
@@ -49,13 +53,13 @@ struct localfs_config {
 struct fuse_opt localfs_opts[] = {MYFS_OPT("src=%s", src, 0), MYFS_OPT("ioengine=%s", ioengine, 0),
                                   MYFS_OPT("exportfs=%s", exportfs, 0), FUSE_OPT_END};
 
-// this simple fuse test MUST run with -s (single thread)
+// this simple fuse test MUST run with -f
 int main(int argc, char *argv[]) {
     // currently they will be initialized inside fuser_go
     // photon::fd_events_init();
     // photon::libaio_wrapper_init();
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-    struct localfs_config cfg;
+    struct localfs_config cfg = {NULL, NULL, NULL};
     fuse_opt_parse(&args, &cfg, localfs_opts, NULL);
     int ioengine = fs::ioengine_libaio;
     if (cfg.ioengine) {
@@ -83,15 +87,15 @@ int main(int argc, char *argv[]) {
         auto wfs = fs::new_aligned_fs_adaptor(fs, 4096, true, true);
         return fuser_go_exportfs(wfs, args.argc, args.argv);
     } else if (cfg.exportfs && *cfg.exportfs == 'c') {
-        photon::Executor eth;
+        photon::Executor eth(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT|photon::INIT_IO_EXPORTFS);
         auto afs = eth.perform([&]() {
             auto fs = fs::new_localfs_adaptor(cfg.src, ioengine);
             auto wfs = fs::new_aligned_fs_adaptor(fs, 4096, true, true);
-            fs::exportfs_init();
             return export_as_sync_fs(wfs);
         });
         umask(0);
         set_fuse_fs(afs);
+        DEFER(delete afs);
         auto oper = photon::fs::get_fuse_xmp_oper();
         return fuse_main(args.argc, args.argv, oper, NULL);
     } else {
