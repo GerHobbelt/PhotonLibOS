@@ -169,51 +169,6 @@ namespace photon
         void* _ptr;
     };
 
-    #if defined(__has_feature)
-    #   if __has_feature(address_sanitizer) // for clang
-    #       define __SANITIZE_ADDRESS__ // GCC already sets this
-    #   endif
-    #endif
-
-    #ifdef __SANITIZE_ADDRESS__
-    extern "C" {
-    // Check out sanitizer/asan-interface.h in compiler-rt for documentation.
-    void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom,
-                                        size_t size);
-    void __sanitizer_finish_switch_fiber(void* fake_stack_save,
-                                         const void** bottom_old, size_t* size_old);
-    }
-
-    static void asan_start(void** save, thread* to) {
-        void* bottom = to->buf ? to->buf : to->stackful_alloc_top;
-        __sanitizer_start_switch_fiber(save, bottom,
-                                       to->stack_size);
-    }
-
-    static void asan_finish(void* save) {
-        __sanitizer_finish_switch_fiber(save, nullptr, nullptr);
-    }
-
-#define ASAN_START() asan_finish((void*)nullptr);
-
-#define ASAN_SWITCH(to)      \
-        void* __save;                  \
-        asan_start(&__save, to);       \
-        DEFER({ asan_finish(__save); });
-
-#define ASAN_DIE_SWITCH(to)  \
-        asan_start(nullptr, to);
-
-#else
-#define ASAN_START(ptr)
-#define ASAN_SWITCH(to)
-#define ASAN_DIE_SWITCH(to)
-#endif
-
-    static void _asan_start() asm("_asan_start");
-
-    __attribute__((used)) static void _asan_start() { ASAN_START(); }
-
     struct thread_list;
     struct thread : public intrusive_list_node<thread> {
         volatile vcpu_t* vcpu;
@@ -244,7 +199,7 @@ namespace photon
             uint64_t rwlock_mark;
             void* retval;
         };
-        char* buf;
+        char* buf = nullptr;
         char* stackful_alloc_top;
         size_t stack_size;
 // offset 96B
@@ -337,6 +292,53 @@ namespace photon
             photon_thread_dealloc(buf, stack_size);
         }
     };
+
+#if defined(__has_feature)
+#   if __has_feature(address_sanitizer) // for clang
+#       ifndef __SANITIZE_ADDRESS__
+#           define __SANITIZE_ADDRESS__ // GCC already sets this
+#       endif
+#   endif
+#endif
+
+#ifdef __SANITIZE_ADDRESS__
+    extern "C" {
+    // Check out sanitizer/asan-interface.h in compiler-rt for documentation.
+    void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom,
+                                        size_t size);
+    void __sanitizer_finish_switch_fiber(void* fake_stack_save,
+                                         const void** bottom_old, size_t* size_old);
+    }
+
+    static void asan_start(void** save, thread* to) {
+        void* bottom = to->buf ? to->buf : to->stackful_alloc_top;
+        __sanitizer_start_switch_fiber(save, bottom,
+                                       to->stack_size);
+    }
+
+    static void asan_finish(void* save) {
+        __sanitizer_finish_switch_fiber(save, nullptr, nullptr);
+    }
+
+#define ASAN_START() asan_finish((void*)nullptr);
+
+#define ASAN_SWITCH(to)      \
+        void* __save;                  \
+        asan_start(&__save, to);       \
+        DEFER({ asan_finish(__save); });
+
+#define ASAN_DIE_SWITCH(to)  \
+        asan_start(nullptr, to);
+
+#else
+#define ASAN_START(ptr)
+#define ASAN_SWITCH(to)
+#define ASAN_DIE_SWITCH(to)
+#endif
+
+    static void _asan_start() asm("_asan_start");
+
+    __attribute__((used)) static void _asan_start() { ASAN_START(); }
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
@@ -753,11 +755,20 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
-        mov     0x40(%rbp), %rdi
-        movq    $0, 0x40(%rbp)
-        call    *0x48(%rbp)
-        mov     %rax, 0x48(%rbp)
-        mov     %rbp, %rdi
+        mov     %rbp, %rbx
+        xor     %rbp, %rbp
+)"
+#ifdef __SANITIZE_ADDRESS__
+R"(
+        call _asan_start
+)"
+#endif
+R"(
+        mov     0x40(%rbx), %rdi
+        movq    %rbp, 0x40(%rbx)
+        call    *0x48(%rbx)
+        mov     %rax, 0x48(%rbx)
+        mov     %rbx, %rdi
         call    _photon_thread_die
 )"
     );
@@ -817,7 +828,6 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
-        call    _asan_start
         mov     0x40(%rbp), %rcx
         movq    $0, 0x40(%rbp)
         call    *0x48(%rbp)
@@ -893,12 +903,20 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        mov x28, x29
+        mov x29, xzr
+)"
+#ifdef __SANITIZE_ADDRESS__
+R"(
         bl _asan_start           //; asan_start()
-        ldp x0, x1, [x29, #0x40] //; load arg, start into x0, x1
-        str xzr, [x29, #0x40]    //; set arg as 0
+)"
+#endif
+R"(
+        ldp x0, x1, [x28, #0x40] //; load arg, start into x0, x1
+        str xzr, [x28, #0x40]    //; set arg as 0
         blr x1                   //; start(x0)
-        str x0, [x29, #0x48]     //; retval = result
-        mov x0, x29              //; move th to x0
+        str x0, [x28, #0x48]     //; retval = result
+        mov x0, x28              //; move th to x0
         b _photon_thread_die     //; _photon_thread_die(th)
 )"
     );
@@ -977,9 +995,9 @@ R"(
             func = (uint64_t)&spinlock_unlock;
             arg = &lock;
         }
+        auto ref = sw.to->stack.pointer_ref();
         ASAN_DIE_SWITCH(sw.to);
-        _photon_switch_context_defer_die(
-            arg, func, sw.to->stack.pointer_ref());
+        _photon_switch_context_defer_die(arg, func, ref);
         __builtin_unreachable();
     }
 
@@ -1283,7 +1301,8 @@ insert_list:
         return rq.current->error_number;
     }
 
-    inline void thread_yield_fast() {
+    __attribute__((noinline))
+    void thread_yield_fast() {
         auto sw = AtomicRunQ().goto_next();
         switch_context(sw.from, sw.to);
     }
