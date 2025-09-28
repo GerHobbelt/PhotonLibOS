@@ -235,6 +235,19 @@ namespace photon
         }
     };
 
+    class qspinlock {
+    public:
+        int try_lock();
+        int lock();
+        bool locked() const {
+            return _owner_tail.load(std::memory_order_acquire);
+        }
+        void unlock();
+    protected:
+        struct holder;
+        std::atomic<holder*> _owner_tail { nullptr };
+    };
+
     class ticket_spinlock {
     public:
         int lock();

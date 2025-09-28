@@ -654,6 +654,8 @@ namespace photon
         }
         Switch try_goto(thread* th) const {
             assert(th->vcpu == vcpu);
+            th->remove_from_list();
+            current->insert_after(th);
             return _do_goto(th);
         }
         bool single() const {
@@ -1254,11 +1256,10 @@ R"(
                 sleepq.pop(th);
                 count++;
             }
-            goto insert_list;
         }
         if (likely(sleepq.empty() || !if_update_now())) {
-            assert(count == 0);
-            return count;
+            if (!count) return 0;
+            else goto insert_list;
         }
         do {
             auto th = sleepq.front();
@@ -1323,6 +1324,8 @@ insert_list:
             assert(th->state == states::READY);
         } else if (unlikely(th->state != states::READY)) {
             LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be READY!", th);
+        } else if (unlikely(rq.current->next() == th)) {
+            return thread_yield();
         }
 
         auto sw = AtomicRunQ(rq).try_goto(th);
@@ -1625,6 +1628,49 @@ insert_list:
     void ticket_spinlock::unlock() {
         const auto successor = serv.load(std::memory_order_relaxed) + 1;
         serv.store(successor, std::memory_order_release);
+    }
+
+    struct qspinlock::holder {
+        std::atomic<holder*> next { nullptr };
+        std::atomic<bool> got_lock { false };
+    };
+    static thread_local qspinlock::holder qslholder;
+    int qspinlock::try_lock() {
+        holder* expected = nullptr;
+        bool ok = _owner_tail.compare_exchange_strong(expected,
+                        &qslholder, std::memory_order_acq_rel);
+        return int(ok) - 1;
+    }
+    int qspinlock::lock() {
+        // forbid gcc to silly update h
+        auto h = &qslholder; asm volatile("": "+r"(h));
+        assert(h->next == nullptr);
+        auto old_tail = _owner_tail.exchange(h, std::memory_order_acq_rel);
+        if (!old_tail) return 0;
+
+        h->got_lock.store(false, std::memory_order_relaxed);
+        assert(old_tail->next.load(std::memory_order_acquire) == nullptr);
+        old_tail->next.store(h, std::memory_order_release);
+        do { spin_wait(); }
+        while (h->got_lock.load(std::memory_order_acquire) == false);
+        return 0;
+    }
+    void qspinlock::unlock() {
+        // forbid gcc to silly update h
+        auto h = &qslholder; asm volatile("": "+r"(h));
+        while(true) {
+            auto next = h->next.load(std::memory_order_acquire);
+            if (next) { // resume the next waiter, if there is one
+                h->next.store(nullptr, std::memory_order_release);
+                next->got_lock.store(true, std::memory_order_release);
+                return;
+            } else {    // do unlock if there is no waiter
+                auto expected = h;
+                if (_owner_tail.compare_exchange_strong(expected,
+                    nullptr, std::memory_order_acq_rel)) return;
+                spin_wait();    // unlock failed, wait and try again
+            }
+        }
     }
 
     inline int waitq_translate_errno(int ret)
