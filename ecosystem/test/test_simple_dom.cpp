@@ -53,6 +53,7 @@ const static char xml[] = R"(
       <DisplayName>1305433xxx</DisplayName>
     </Owner>
   </Contents>
+  <asdf>asdf</asdf>
   <Contents>
     <Key>test100.txt</Key>
     <LastModified>2020-05-26T07:50:20.000Z</LastModified>
@@ -108,8 +109,8 @@ int do_list_object(string_view prefix, ObjectList& result, string* marker) {
         EXPECT_TRUE(key);
         auto size = child["Size"];
         EXPECT_TRUE(size);
-        auto text = key.to_string();
-        auto dsize = size.to_integer();
+        auto text = key.to_string_view();
+        auto dsize = size.to_int64_t();
         LOG_DEBUG(VALUE(text), VALUE(dsize));
         result.emplace_back(0, DT_REG, text.substr(prefix.size()),
                                 dsize, text.size() == prefix.size());
@@ -122,7 +123,7 @@ int do_list_object(string_view prefix, ObjectList& result, string* marker) {
     for (auto child: list_bucket_result.enumerable_children("CommonPrefixes")) {
         auto key = child["Prefix"];
         EXPECT_TRUE(key);
-        auto dirname = key.to_string();
+        auto dirname = key.to_string_view();
         if (dirname.back() == '/') dirname.remove_suffix(1);
         // update_stat_cache(dirname, 0, OSS_DIR_MODE);
         dirname.remove_prefix(prefix.size());
@@ -130,7 +131,7 @@ int do_list_object(string_view prefix, ObjectList& result, string* marker) {
     }
     if (marker) {
         auto next_marker = list_bucket_result["NextMarker"];
-        if  (next_marker) *marker = next_marker.to_string();
+        if  (next_marker) *marker = next_marker.to_string_view();
         else marker->clear();
     }
     return 0;
@@ -141,15 +142,9 @@ TEST(simple_dom, oss_list) {
     string marker;
     do_list_object("", list, &marker);
     static ObjectList truth = {
-        {0, DT_REG, "test100.txt", 1, false},
         {0, DT_REG, "test10.txt",  1, false},
+        {0, DT_REG, "test100.txt", 1, false},
     };
-    using T = decltype(truth[0]);
-    auto cmp = [](T& a, T& b) {
-        return std::get<2>(a) < std::get<2>(b);
-    };
-    std::sort(truth.begin(), truth.end(), cmp);
-    std::sort(list.begin(),  list.end(),  cmp);
     EXPECT_EQ(list, truth);
     EXPECT_EQ(marker, "test100.txt");
 }
@@ -158,7 +153,7 @@ void expect_eq_kvs(Node node, const char * const *  truth, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         auto x = truth + i * 2;
         auto q = node[x[0]];
-        LOG_DEBUG("expect node['`'] => '`' (got '`')", x[0], x[1], q.to_string());
+        LOG_DEBUG("expect node['`'] => '`' (got `)", x[0], x[1], q.to_string_view());
         EXPECT_EQ(q, x[1]);
     }
 }
@@ -172,7 +167,7 @@ void expect_eq_vals(Node node, const char * const *  truth, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         auto x = truth[i];
         auto q = node[i];
-        LOG_DEBUG("expect node[`] => '`' (got '`')", i, x, q.to_string());
+        LOG_DEBUG("expect node[`] => '`' (got '`')", i, x, q.to_string_view());
         EXPECT_EQ(q, x);
     }
 }
@@ -201,8 +196,8 @@ TEST(simple_dom, json) {
         {"i",       "-123"},
         {"pi",      "3.1416"},
     });
-    EXPECT_EQ(doc["i"].to_integer(), -123);
-    EXPECT_NEAR(doc["pi"].to_number(), 3.1416, 1e-5);
+    EXPECT_EQ(doc["i"].to_int64_t(), -123);
+    EXPECT_NEAR(doc["pi"].to_double(), 3.1416, 1e-5);
     expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
 }
 
@@ -245,4 +240,94 @@ I am something: indeed
     });
     expect_eq_vals(doc["bar"], {"20", "30",
         "oh so nice", "oh so nice (serialized)"});
+}
+
+const static char example_ini[] = R"(
+[protocol]               ; Protocol configuration
+version=6                ; IPv6
+
+[user]
+name = Bob Smith         ; Spaces around '=' are stripped
+email = bob@smith.com    ; And comments (like this) ignored
+active = true            ; Test a boolean
+pi = 3.14159             ; Test a floating point number
+trillion = 1000000000000 ; Test 64-bit integers
+
+[protocol]               ; Protocol configuration
+  ver  =   4                ; IPv4
+
+[section1]
+single1 = abc
+single2 = xyz
+[section3]
+single: ghi
+multi: the quick
+name = bob smith  ; comment line 1
+                  ; comment line 2
+foo = bar ;c1
+
+[comment_test]
+test1 = 1;2;3 ; only this will be a comment
+test2 = 2;3;4;this won't be a comment, needs whitespace before ';'
+test;3 = 345 ; key should be "test;3"
+test4 = 4#5#6 ; '#' only starts a comment at start of line
+#test5 = 567 ; entire line commented
+ # test6 = 678 ; entire line commented, except in MULTILINE mode
+test7 = ; blank value, except if inline comments disabled
+test8 =; not a comment, needs whitespace before ';'
+
+[colon_tests]
+Content-Type: text/html
+foo:bar
+adams : 42
+funny1 : with = equals
+funny2 = with : colons
+funny3 = two = equals
+funny4 : two : colons
+
+
+)";
+
+TEST(simple_dom, ini) {
+    auto doc = parse_copy(example_ini, sizeof(example_ini) - 1, DOC_INI);
+    EXPECT_TRUE(doc);
+    EXPECT_EQ(doc.num_children(), 6);
+    expect_eq_kvs(doc["protocol"], {
+        {"version",  "6"},
+        {"ver",      "4"},
+    });
+    expect_eq_kvs(doc["user"], {
+        {"name",     "Bob Smith"},
+        {"email",    "bob@smith.com"},
+        {"active",   "true"},
+        {"pi",       "3.14159"},
+        {"trillion", "1000000000000"},
+    });
+    expect_eq_kvs(doc["section1"], {
+        {"single1",   "abc"},
+        {"single2",   "xyz"},
+    });
+    expect_eq_kvs(doc["section3"], {
+        {"single",    "ghi"},
+        {"multi",     "the quick"},
+        {"name",      "bob smith"},
+        {"foo",       "bar"},
+    });
+    expect_eq_kvs(doc["comment_test"], {
+        {"test1",  "1;2;3"},
+        {"test2",  "2;3;4;this won't be a comment, needs whitespace before ';'"},
+        {"test;3", "345"},
+        {"test4",  "4#5#6"},
+        {"test7",  ""},
+        {"test8",  "; not a comment, needs whitespace before ';'"},
+    });
+    expect_eq_kvs(doc["colon_tests"], {
+        {"Content-Type",  "text/html"},
+        {"foo",     "bar"},
+        {"adams",   "42"},
+        {"funny1",  "with = equals"},
+        {"funny2",  "with : colons"},
+        {"funny3",  "two = equals"},
+        {"funny4",  "two : colons"},
+    });
 }

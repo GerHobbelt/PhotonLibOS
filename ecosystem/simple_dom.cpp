@@ -10,6 +10,7 @@
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/utility.h>
+#include <photon/common/estring.h>
 #include <photon/common/stream.h>
 #include <photon/common/retval.h>
 #include <photon/fs/localfs.h>
@@ -102,16 +103,43 @@ public:
             LOG_DEBUG(VALUE(depth), k, ':', v);
         }
     }
-    void set_children(vector<Derived>&& nodes, bool _sort = true) {
+    struct Compare {
+        const DocNode* _this;
+        bool operator()(uint32_t i, uint32_t j) const {
+            auto si = _this->_children[i].get_key();
+            auto sj = _this->_children[j].get_key();
+            return si < sj || (si == sj && i < j);
+        }
+        bool operator()(str s, uint32_t j) const {
+            return s < _this->_children[j].get_key();
+        }
+        bool operator()(uint32_t i, str s) const {
+            return _this->_children[i].get_key() < s;
+        }
+    };
+    std::unique_ptr<uint32_t[]> _index;
+    void set_children(vector<Derived>&& nodes, bool _indexing = true) {
         if (nodes.empty()) return;
         assert(nodes.size() <= MAX_NCHILDREN);
         if (nodes.size() > MAX_NCHILDREN)
             nodes.resize(MAX_NCHILDREN);
-        if (_sort)
-            sort(nodes.begin(), nodes.end());
-        nodes.back()._flags |= FLAG_IS_LAST;    // must be after sort!!!
-        _nchildren = nodes.size();
         _children = std::move(nodes);
+        _nchildren = _children.size();
+        if (_indexing) {
+            _index.reset(new uint32_t[_nchildren]);
+            for (size_t i = 0; i < _nchildren; ++i) _index[i] = i;
+            std::sort(_index.get(), _index.get() + _nchildren, Compare{this});
+            Derived *a, *b = &_children[_index[0]];
+            for (size_t i = 1; i < _nchildren; ++i) {
+                a = b; b = &_children[_index[i]];
+                if (a->get_key() != b->get_key())
+                    a->_flags |= FLAG_EQUAL_KEY_LAST;
+            }
+            b->_flags |= FLAG_EQUAL_KEY_LAST;
+        }
+        // user-side has no idea about # of children,
+        // so we use this flag to indicate ending
+        _children.back()._flags |= FLAG_IS_LAST;
     }
     ~DocNode() override {
         if (is_root()) {
@@ -121,16 +149,20 @@ public:
         }
     }
     const NodeImpl* get(size_t i) const override {
-        return (i < _children.size()) ? &_children[i] : nullptr;
+        return (i < _nchildren) ? &_children[i] : nullptr;
     }
     const NodeImpl* get(str key) const override {
         if (_children.empty()) return nullptr;
-        for (size_t i = 0; i < _children.size() - 1; ++i) {
+        for (size_t i = 0; i < _nchildren - 1U; ++i) {
            assert((_children[i]._flags & FLAG_IS_LAST) == 0);
         }
         assert(_children.back()._flags & FLAG_IS_LAST);
-        auto it = std::lower_bound(_children.begin(), _children.end(), key);
-        return (it == _children.end() || it->get_key() != key) ? nullptr : &*it;
+        if (!_index) return nullptr;
+        auto end = _index.get() + _nchildren;
+        auto it = std::lower_bound(_index.get(), end, key, Compare{this});
+        if (it == end || *it >= _nchildren || key != _children[*it].get_key())
+            return nullptr;
+        return &_children[*it];
     }
 };
 
@@ -196,13 +228,13 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
         commit(true);
         return true;
     }
-    void commit(bool sort) {
+    void commit(bool _indexing) {
         assert(_nodes.size() > 1);
         auto temp = std::move(_nodes.back());
         _nodes.pop_back();
         assert(_nodes.back().size() > 0);
-        // LOG_DEBUG(temp.size(), " elements to ", _nodes.back().back().get_key(), " sort=", sort);
-        _nodes.back().back().set_children(std::move(temp), sort);
+        // LOG_DEBUG(temp.size(), " elements to ", _nodes.back().back().get_key(), VALUE(_indexing));
+        _nodes.back().back().set_children(std::move(temp), _indexing);
     }
     bool StartArray() {
         emplace_back(0, 0);
@@ -303,8 +335,82 @@ static NodeImpl* parse_yaml(char* text, size_t size, int flags) {
     return root;
 }
 
+class IniNode : public DocNode<IniNode> {
+public:
+    using DocNode<IniNode>::DocNode;
+};
+
+using ini_handler = void (*)(void*, estring_view, estring_view, estring_view);
+static int do_parse_ini(estring_view text, ini_handler h, void* user) {
+    int err_cnt = 0;
+    estring_view section;
+    for (auto line: text.split_lines()) {
+        auto comment = line.rfind(" ;");
+        if (comment < line.size())
+            line = line.substr(0, comment);
+        line = line.trim();
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        if (line[0] == '[') {
+            if (line.back() == ']') {
+                section = line.substr(1, line.size() - 2).trim();
+            } else {
+                err_cnt++;
+                LOG_DEBUG("section with no ending: ", line);
+            }
+        } else {
+            auto eq = line.find_first_of(charset("=:"));
+            if (eq > 0 && eq < line.size() - 1) {
+                auto key = line.substr(0, eq).trim();
+                auto val = line.substr(eq + 1).trim();
+                h(user, section, key, val);
+            } else {
+                err_cnt++;
+                LOG_DEBUG("ill formed kv: ", line);
+            }
+        }
+    }
+    return -err_cnt;
+}
+
 static NodeImpl* parse_ini(char* text, size_t size, int flags) {
-    return nullptr;
+    struct Item {
+        estring_view section, key, val;
+        bool operator < (const Item& rhs) const {
+            return section < rhs.section;
+        }
+    };
+    vector<Item> ctx;
+    auto handler = [](void* user, estring_view section,
+                estring_view key, estring_view val) {
+        auto ctx = (vector<Item>*)user;
+        ctx->push_back({section, key, val});
+        LOG_DEBUG(VALUE(section), VALUE(key), VALUE(val));
+    };
+    int ret = do_parse_ini({text, size}, handler, &ctx);
+    if (ret < 0 && ctx.empty())
+        LOG_ERROR_RETURN(-1, nullptr, "ini_parse_string_length() failed: ", ret);
+
+    sort(ctx.begin(), ctx.end());
+    vector<IniNode> sections, nodes;
+    estring_view prev_sect;
+    auto root = new IniNode(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+    for (auto& x : ctx) {
+        if (prev_sect != x.section) {
+            prev_sect  = x.section;
+            if (!nodes.empty() && !sections.empty()) {
+                sections.back().set_children(std::move(nodes));
+                assert(nodes.empty());
+            }
+            sections.emplace_back(x.section, str{}, root);
+        }
+        nodes.emplace_back(x.key, x.val, root);
+    }
+    if (!sections.empty()) {
+        if (!nodes.empty())
+            sections.back().set_children(std::move(nodes));
+        root->set_children(std::move(sections));
+    }
+    return root;
 }
 
 Node parse(char* text, size_t size, int flags) {
@@ -318,7 +424,9 @@ Node parse(char* text, size_t size, int flags) {
         if (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) free(text);
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid document type ", HEX(i));
     }
-    return parsers[i](text, size, flags);
+    auto r = parsers[i](text, size, flags);
+    if (!r && (flags & DOC_FREE_TEXT_IF_PARSING_FAILED)) free(text);
+    return r;
 }
 
 Node parse_file(fs::IFile* file, int flags) {

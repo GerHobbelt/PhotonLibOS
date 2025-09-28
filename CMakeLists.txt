@@ -28,6 +28,7 @@ because Photon will register coroutine locks for crypto. But don't bother if you
 option(PHOTON_ENABLE_SASL "enable sasl" OFF)
 option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
+option(PHOTON_ENABLE_SPDK_BDEV "Use SPDK bdev concept" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
 option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" OFF)
 option(PHOTON_ENABLE_RSOCKET "enable rsocket" OFF)
@@ -44,6 +45,7 @@ set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing/archive/refs/tags/lib
 set(PHOTON_FUSE_SOURCE "" CACHE STRING "")
 set(PHOTON_GSASL_SOURCE "" CACHE STRING "")
 set(PHOTON_FSTACK_SOURCE "" CACHE STRING "")
+set(PHOTON_SPDK_SOURCE "" CACHE STRING "")
 set(PHOTON_E2FS_SOURCE "" CACHE STRING "")
 set(PHOTON_GFLAGS_SOURCE "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz" CACHE STRING "")
 set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz" CACHE STRING "")
@@ -59,13 +61,13 @@ if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${
 endif ()
 
 # Global compile options, only effective within this project
-set(global_compile_options "-Wall -Wno-error=pragmas")
-if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
-    # Hint: -faligned-new is enabled by default after -std=c++17
-    set(global_compile_options "${global_compile_options} -Werror -faligned-new")
-endif ()
+set(global_compile_options "-Werror -Wall -Wno-error=pragmas")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${global_compile_options}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${global_compile_options}")
+if (${CMAKE_CXX_COMPILER_ID} STREQUAL GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
+    # Hint: -faligned-new is enabled by default after -std=c++17
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -faligned-new")
+endif ()
 
 if (PHOTON_BUILD_WITH_ASAN)
     if ((NOT CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
@@ -82,6 +84,9 @@ set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -DNDEBUG -g")
 set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
+set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
+set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
+set(CMAKE_C_FLAGS_RELWITHDEBINFO ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -91,21 +96,13 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 if (${ARCH} STREQUAL x86_64)
-    # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-elseif (${ARCH} STREQUAL aarch64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native -fsigned-char -fno-stack-protector -fomit-frame-pointer")
-endif ()
-
-if (${ARCH} STREQUAL x86_64)
     check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
     if (COMPILER_HAS_MCRC32_FLAG)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
     endif ()
+elseif (${ARCH} STREQUAL aarch64)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native -fsigned-char -fno-stack-protector -fomit-frame-pointer")
 endif ()
-
-set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
-set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
-set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
 
 # Default build type is Release
 if (NOT CMAKE_BUILD_TYPE)
@@ -149,6 +146,9 @@ endif ()
 if (PHOTON_ENABLE_FSTACK_DPDK)
     LIST(APPEND dependencies fstack)
 endif ()
+if (PHOTON_ENABLE_SPDK_BDEV)
+    LIST(APPEND dependencies spdk)
+endif()
 if (PHOTON_ENABLE_EXTFS)
     LIST(APPEND dependencies e2fs)
 endif()
@@ -207,6 +207,7 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         net/*.cpp
         net/http/*.cpp
         net/security-context/tls-stream.cpp
+        net/vdma/*.cpp
         rpc/*.cpp
         thread/*.cpp
         )
@@ -215,9 +216,9 @@ if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
     file(GLOB CACHE_SRC 
-        cache/*.cpp
-        cache/full_file_cache/*.cpp 
-        cache/persistent_cache/*.cpp
+        fs/cache/*.cpp
+        fs/cache/full_file_cache/*.cpp 
+        fs/cache/persistent_cache/*.cpp
     )
     list(APPEND PHOTON_SRC
         io/aio-wrapper.cpp
@@ -229,14 +230,20 @@ else ()
         list(APPEND PHOTON_SRC io/iouring-wrapper.cpp)
     endif ()
 endif ()
+
 if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2" OR PHOTON_ENABLE_FUSE STREQUAL "3")
-    list(APPEND PHOTON_SRC fs/fuse_adaptor.cpp)
+    file(GLOB FUSE_ADAPTOR_SRC fs/fuse_adaptor/*.cpp)
+    list(APPEND PHOTON_SRC ${FUSE_ADAPTOR_SRC})
 endif ()
+
 if (PHOTON_ENABLE_SASL)
     list(APPEND PHOTON_SRC net/security-context/sasl-stream.cpp)
 endif ()
 if (PHOTON_ENABLE_FSTACK_DPDK)
     list(APPEND PHOTON_SRC io/fstack-dpdk.cpp)
+endif ()
+if (PHOTON_ENABLE_SPDK_BDEV)
+    list(APPEND PHOTON_SRC io/spdkbdev-wrapper.cpp)
 endif ()
 if (PHOTON_ENABLE_EXTFS)
     file(GLOB EXTFS_SRC fs/extfs/*.cpp)
@@ -253,7 +260,7 @@ if (NOT ${PHOTON_ENABLE_LIBCURL})
     list(REMOVE_ITEM PHOTON_SRC net/curl.cpp fs/httpfs/httpfs.cpp)
 endif ()
 if (PHOTON_BUILD_OCF_CACHE)
-    add_subdirectory(cache/ocf_cache)
+    add_subdirectory(fs/cache/ocf_cache)
 endif()
 
 
@@ -270,7 +277,7 @@ if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2")
     target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
     target_include_directories(photon_obj PRIVATE ${FUSE_INCLUDE_DIRS})
 elseif (PHOTON_ENABLE_FUSE STREQUAL "3")
-    target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=35)
+    target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=317)
     target_include_directories(photon_obj PRIVATE ${FUSE3_INCLUDE_DIRS})
 endif ()
 if (PHOTON_GLOBAL_INIT_OPENSSL)
@@ -289,6 +296,10 @@ endif()
 if (PHOTON_ENABLE_FSTACK_DPDK)
     target_compile_definitions(photon_obj PRIVATE ENABLE_FSTACK_DPDK)
     target_include_directories(photon_obj PRIVATE ${FSTACK_INCLUDE_DIRS})
+endif()
+if (PHOTON_ENABLE_SPDK_BDEV)
+    target_compile_definitions(photon_obj PRIVATE ENABLE_SPDK_BDEV)
+    target_include_directories(photon_obj PRIVATE ${SPDK_INCLUDE_DIRS})
 endif()
 if (PHOTON_ENABLE_EXTFS)
     target_include_directories(photon_obj PRIVATE ${E2FS_INCLUDE_DIRS})
@@ -333,6 +344,9 @@ if (PHOTON_ENABLE_SASL)
 endif ()
 if (PHOTON_ENABLE_FSTACK_DPDK)
     list(APPEND static_deps ${FSTACK_LIBRARIES})
+endif ()
+if (PHOTON_ENABLE_SPDK_BDEV)
+    list(APPEND static_deps ${SPDK_LIBRARIES})
 endif ()
 if (PHOTON_ENABLE_EXTFS)
     list(APPEND static_deps ${E2FS_LIBRARIES})
@@ -446,7 +460,7 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
     if (NOT APPLE)
-        add_subdirectory(cache/test)
+        add_subdirectory(fs/cache/test)
     endif()
     if (PHOTON_ENABLE_ECOSYSTEM)
         add_subdirectory(ecosystem/test)
