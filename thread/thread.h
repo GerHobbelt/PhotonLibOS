@@ -219,6 +219,9 @@ namespace photon
             return (likely(!load()) &&
                     likely(!xchg())) ? 0 : -1;
         }
+        bool locked() const {
+            return _lock;
+        }
         void unlock() {
             _lock.store(false, std::memory_order_release);
         }
@@ -434,6 +437,10 @@ namespace photon
     public:
         explicit semaphore(uint64_t count = 0, bool in_order_resume = true)
             : m_count(count), m_ooo_resume(!in_order_resume) { }
+
+        /**
+         * @brief A wrapper of wait that cannot be interrupted
+         */
         int wait(uint64_t count, Timeout timeout = {}) {
             int ret = 0;
             do {
@@ -441,7 +448,17 @@ namespace photon
             } while (ret < 0 && (errno != ESHUTDOWN && errno != ETIMEDOUT));
             return ret;
         }
+
+        /**
+         * @return 1) Count is successfully subtracted (might have been waited). Returns 0.
+         *         2) Count is not enough until timeout. Returns -1, errno is set to ETIMEDOUT.
+         *         3) Interrupted by another thread before timeout. Returns -1, errno is decided by the interrupter.
+         */
         int wait_interruptible(uint64_t count, Timeout timeout = {});
+
+        /**
+         * @brief Add count. Does not require Photon environment, can be invoked in any std thread.
+         */
         int signal(uint64_t count) {
             if (count == 0) return 0;
             SCOPED_LOCK(splock);
@@ -449,6 +466,7 @@ namespace photon
             try_resume(cnt);
             return 0;
         }
+
         uint64_t count() const {
             return m_count.load(std::memory_order_relaxed);
         }
@@ -459,6 +477,35 @@ namespace photon
         spinlock splock;
         bool try_subtract(uint64_t count);
         void try_resume(uint64_t count);
+    };
+
+    // one-shot semaphore
+    class disposable_semaphore {
+    public:
+        int wait(Timeout timeout) {
+            uint64_t th = 0, current = (uint64_t)CURRENT;
+            assert(current && !(current & 1));
+            if (!_waiter.compare_exchange_strong(th, current)) {
+                assert(th == 0x1);
+                return 0;
+            }
+            int ret = thread_usleep_defer(timeout, &defer, this);
+            if (likely(ret < 0)) { assert(errno == -1); return 0; }
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        void signal() {
+            auto th = _waiter.fetch_or(0x1);
+            if (!th) { } // first signal (async op completion) before the CAS, AKA _waiter.compare_exchange_strong()
+            else if (!(th&1)) { } // first signal after the CAS, either async op completion or usleep defer
+            else { assert((th>>1) && (th&1)); // second signal()
+                thread_interrupt((thread*)(th&~1), -1);
+            }
+        }
+
+    protected:
+        std::atomic<uint64_t> _waiter{0};
+        static void defer(void* arg);
     };
 
     // to be different to timer flags
