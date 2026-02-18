@@ -214,13 +214,22 @@ namespace photon
 #endif
     }
 
+    inline void spin_wait_n(uint32_t n) {
+        for (uint32_t i = 0; i < n; ++i) {
+            spin_wait();
+        }
+    }
+
     class spinlock {
     public:
         int lock() {
+            uint32_t delay = 1;
+            constexpr uint32_t max_delay = 1024;
             while (unlikely(xchg())) {
-                while (likely(load())) {
-                    spin_wait();
-                }
+                do {
+                    spin_wait_n(delay);
+                    if (delay < max_delay) delay <<= 1;
+                } while (likely(load()));
             }
             return 0;
         }
@@ -293,7 +302,8 @@ namespace photon
     class mutex : protected waitq
     {
     public:
-        mutex(uint16_t max_retries = 100) : retries(max_retries) { }
+        mutex(uint16_t max_retries = 100, bool contending = false)
+            : retries(max_retries), _contending(contending) { }
         int lock(Timeout timeout = {});
         int try_lock();
         void unlock();
@@ -306,6 +316,7 @@ namespace photon
         std::atomic<thread*> owner{nullptr};
         uint16_t retries;
         spinlock splock;
+        bool _contending;
     };
 
     class seq_mutex : protected mutex {
@@ -599,7 +610,7 @@ namespace photon
 */
 #define WITH_LOCK(mutex) if (auto __lock__ = scoped_lock(mutex))
 
-#define SCOPE_MAKESURE_YIELD                                               \
-    uint64_t __swc_##__LINE__ = get_vcpu(photon::CURRENT)->switch_count;   \
-    DEFER(if (__swc_##__LINE__ == get_vcpu(photon::CURRENT)->switch_count) \
-              photon::thread_yield(););
+#define SCOPE_MAKESURE_YIELD                                                              \
+    uint64_t _CONCAT(__swc__, __LINE__) = get_vcpu(photon::CURRENT)->switch_count;        \
+    DEFER(({if (_CONCAT(__swc__, __LINE__) == get_vcpu(photon::CURRENT)->switch_count)    \
+              photon::thread_yield();}))
