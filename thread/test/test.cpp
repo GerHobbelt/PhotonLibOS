@@ -491,6 +491,31 @@ TEST(Timer, Reapting)
     // timer_destroy(timer_arg.ptimer);
 }
 
+TEST(Timer, Reapting2)
+{
+    timer_count = 5;
+    t0 = now_time();
+    auto cb = [](void* arg) -> uint64_t {
+        LOG_INFO("timer callback");
+        auto t1 = now_time();
+        auto delta_t = t1 - t0;
+        EXPECT_GT(delta_t, 1 * 1000 * 1000);
+        EXPECT_LT(delta_t, 2 * 1000 * 1000);
+        t0 = t1;
+        LOG_INFO(VALUE(delta_t));
+        LOG_INFO(VALUE(timer_count));
+        auto& timer_count = *(int*)arg;
+        timer_count--;
+        return 0;
+    };
+    Timer timer(1000*1000, {cb, &timer_count});
+    while(timer_count >= 0) {
+        usleep(200000); // 200ms. Simulate the situation of cpu usage
+        std::cout << "ready to yield" << std::endl;
+        photon::thread_yield();
+    }
+}
+
 TEST(Thread, function)
 {
     photon::join_handle* th1 = photon::thread_enable_join(photon::thread_create(&asdf, (void*)0));
@@ -1161,6 +1186,26 @@ void* test_smp_cvar(void* args_)
         }
     thread_join((join_handle*)th);
     return 0;
+}
+
+TEST(get, info) {
+    EXPECT_EQ(get_vcpu_num(), 1);
+    auto expect_info = [](uint64_t run, uint64_t standby, uint64_t sleep) {
+        EXPECT_EQ(get_info(INFO_RUNNABLE_THREAD_NUM), run);
+        EXPECT_EQ(get_info(INFO_STANDBY_THREAD_NUM), standby);
+        EXPECT_EQ(get_info(INFO_SLEEPING_THREAD_NUM), sleep);
+        EXPECT_EQ(get_info(INFO_THREAD_NUM), run + sleep);
+    };
+    expect_info(2, 0, 0);
+    photon::condition_variable cvar;
+    thread_create11([&]() { cvar.wait_no_lock(); });
+    expect_info(3, 0, 0);
+    thread_yield();
+    expect_info(2, 0, 1);
+    cvar.notify_one();
+    expect_info(3, 0, 0);
+    thread_yield();
+    expect_info(2, 0, 0);
 }
 
 TEST(smp, cvar)

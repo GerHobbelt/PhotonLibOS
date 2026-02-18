@@ -177,9 +177,9 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     vector<vector<JNode>> _nodes{1};
     str _key;
     JNode* _root;
-    JHandler(const char* text, bool text_ownership) {
+    JHandler(const char* text) {
         assert(_nodes.size() == 1);
-        _root = new JNode(text, text_ownership);
+        _root = new JNode(text, false);
     }
     ~JHandler() {
         delete _root;
@@ -254,21 +254,49 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
 // As some parsers don't support text length, they only support null
 // terminated strings, so we have to convert the last trailer to '\0',
 // while making the parser to treat it as the trailer.
-inline void fix_trail(char* text, size_t size, char trailer) {
-    auto i = estring_view(text, size).rfind(trailer);
-    if (i != estring_view::npos) text[i] = '\0';
+static bool fix_trail(estring_view text, char header, char trailer) {
+    auto i = text.rfind(trailer);
+    if (i == estring_view::npos)
+        LOG_ERROR_RETURN(EINVAL, false, "no trailer found");
+    for (char c: text.substr(i+1))
+        if (!isspace(c))
+            LOG_ERROR_RETURN(EINVAL, false, "illegal character after trailer");
+    size_t k = 0;
+    for (char c: text.substr(0, i+1)) {
+        if (!c)
+            LOG_ERROR_RETURN(EINVAL, false, "unexpected '\\0'");
+        if (c == header) ++k;
+        else if (c == trailer)
+                if (k-- == 0) goto failed;
+    }
+    if (k != 0) failed:
+        LOG_ERROR_RETURN(EINVAL, false, "unbalanced header/trailer");
+    auto c = &text[i];
+    *(char*)c = '\0';
+    return true;
 }
 
 static NodeImpl* parse_json(char* text, size_t size, int flags) {
+    // without kParseStopWhenDoneFlag, rapidjson will expect the last character of
+    // the JSON string to be '\0'.
     const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
-             kParseInsituFlag | kParseCommentsFlag | kParseTrailingCommasFlag;
-    fix_trail(text, size, '}');
-    JHandler h(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+                        kParseInsituFlag | kParseCommentsFlag |
+                        kParseTrailingCommasFlag | kParseStopWhenDoneFlag;
+    if (!fix_trail({text, size}, '{', '}')) return nullptr;
+    JHandler h(text);
     using Encoding = UTF8<>;
     GenericInsituStringStream<Encoding> s(text);
     GenericReader<Encoding, Encoding> reader;
-    reader.Parse<kFlags>(s, h);
-    return h.get_root();
+    auto res = reader.Parse<kFlags>(s, h);
+    if (!res) {
+        LOG_ERROR("json parsing failed with error ` at `, origin size `",
+                  res.Code(), res.Offset(), size);
+        return nullptr;
+    }
+    auto root = h.get_root();
+    if (flags & DOC_FREE_TEXT_ON_DESTRUCTION)
+        root->_flags |= NodeImpl::FLAG_TEXT_OWNERSHIP;
+    return root;
 }
 
 using namespace rapidxml;
@@ -311,7 +339,7 @@ public:
 };
 
 static NodeImpl* parse_xml(char* text, size_t size, int flags) {
-    fix_trail(text, size, '>');
+    if (!fix_trail({text, size}, '<', '>')) return nullptr;
     xml_document<char> doc;
     doc.parse<0>(text);
     auto root = make_unique<XMLNode>(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
@@ -342,6 +370,12 @@ public:
 };
 
 static NodeImpl* parse_yaml(char* text, size_t size, int flags) {
+    ryml::s_default_callbacks.m_error = [](const char* msg, size_t msg_len,
+                                           ryml::Location location,
+                                           void* user_data) {
+        LOG_ERROR("yaml parsing failed with `", std::string_view(msg, msg_len));
+        throw std::runtime_error("yaml parsing failed");
+    };
     auto yaml = ryml::parse_in_place({text, size});
     auto root = make_unique<YAMLNode>(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     assert(root);
@@ -434,7 +468,7 @@ Node parse(char* text, size_t size, int flags) {
     constexpr static Parser parsers[] = {&parse_json, &parse_xml,
                                          &parse_yaml, &parse_ini};
     auto i = flags & DOC_TYPE_MASK;
-    if ((size_t) i > LEN(parsers)) {
+    if ((size_t) i >= LEN(parsers)) {
         if (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) free(text);
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid document type ", HEX(i));
     }

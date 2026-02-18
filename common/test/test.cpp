@@ -32,6 +32,8 @@ limitations under the License.
 #include "../range-lock.h"
 #include "../expirecontainer.h"
 #include "../retval.h"
+#include "../strbuilder.h"
+#include "../ordered_span.h"
 #include <photon/thread/timer.h>
 #include <photon/thread/thread11.h>
 
@@ -508,8 +510,8 @@ TEST(iovector, test1)
     IOVector iov;
     EXPECT_EQ(iov.sum(), 0);
     EXPECT_TRUE(iov.empty());
-    EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve);
-    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve);
+    EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_reserve_front);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_reserve_front);
     EXPECT_EQ(iov.begin(), iov.iovec());
 
     iovec v{nullptr, 33}, v2{nullptr, 44};
@@ -524,8 +526,8 @@ TEST(iovector, test1)
     EXPECT_EQ(iov.front(), v2);
     EXPECT_EQ(iov.back(), v);
     EXPECT_EQ(iov.iovcnt(), 3);
-    EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve - 3);
-    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve);
+    EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_reserve_front - 3);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_reserve_front);
     EXPECT_EQ(iov.sum(), 44+55+33);
 
     iov.push_back(77);
@@ -539,8 +541,8 @@ TEST(iovector, test1)
     EXPECT_EQ(iov.front(), v2);
     EXPECT_EQ(iov.back(), v);
     EXPECT_EQ(iov.iovcnt(), 6);
-    EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve - 3);
-    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve - 3);
+    EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_reserve_front - 3);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_reserve_front - 3);
     EXPECT_EQ(iov.sum(), 44+55+33 + 77+44+33);
 
     EXPECT_EQ(iov.pop_front(), 44);
@@ -911,6 +913,50 @@ TEST(estring, test)
     EXPECT_EQ(a[1], "q3r1234");
     EXPECT_EQ(a[2], "poiu");
 
+    sp = s.split(cs, false);
+    it = sp.begin();
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "alskdjf");
+    EXPECT_EQ(remainder, ";;,q3r1234;poiu");
+    it ++;
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "");
+    EXPECT_EQ(remainder, ";,q3r1234;poiu");
+    it ++;
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "");
+    EXPECT_EQ(remainder, ",q3r1234;poiu");
+    it ++;
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "");
+    EXPECT_EQ(remainder, "q3r1234;poiu");
+    it ++;
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "q3r1234");
+    EXPECT_EQ(remainder, "poiu");
+
+    a.clear();
+    for (auto x: sp)
+    {
+        a.push_back(x);
+        LOG_DEBUG(x);
+    }
+
+    EXPECT_EQ(a.size(), 6);
+    EXPECT_EQ(a[0], "alskdjf");
+    EXPECT_EQ(a[4], "q3r1234");
+    EXPECT_EQ(a[5], "poiu");
+
     auto sv = s;//.view();
     EXPECT_TRUE(sv.starts_with("alskdjf"));
     EXPECT_FALSE(sv.starts_with("alsk32"));
@@ -926,12 +972,15 @@ TEST(estring, test)
 
     EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
     EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
+    EXPECT_EQ(estring_view("-234423").to_int64_check(), 7);
     EXPECT_EQ(estring_view("asfdsf").to_uint64(32), 32);
+    EXPECT_EQ(estring_view("1234567jkl").to_uint64_check(), 7);
     EXPECT_NEAR(estring_view("-3.14").to_double(), -3.14, 1e-5);
     EXPECT_NEAR(estring_view("1e10").to_double(), 1e10, 1e-5);
-
+    EXPECT_EQ(estring_view("-3.14e0asdf").to_double_check(), 7);
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
+    EXPECT_EQ(estring_view("1a2b3d4e5fq").hex_to_uint64_check(), 10);
 
     estring_view s1 = "sdfsf234sdfji2ljk34", s2 = "sdfsf", s3 = "SDFSF";
     estring_view s4 = "sdfsf3", s5 = "sdfsf234sdfji3";
@@ -1263,6 +1312,19 @@ TEST(string_key, unordered_map_string_kv) {
 
     test_map["qwer"] = "1111";
     EXPECT_EQ(test_map["qwer"], "1111");
+
+    unordered_map_string_kv new_map{test_map};
+    EXPECT_EQ(new_map.size(), test_map.size());
+    new_map.clear();
+    new_map["2xxx"] = "2";
+    new_map = test_map;
+    EXPECT_EQ(new_map.size(), test_map.size());
+    new_map.clear();
+    new_map["3yyy"] = "3";
+    new_map = unordered_map_string_kv{test_map};
+    EXPECT_EQ(new_map.size(), test_map.size());
+    unordered_map_string_kv new_map2{unordered_map_string_kv{test_map}};
+    EXPECT_EQ(new_map2.size(), test_map.size());
 }
 
 TEST(string_key, unordered_map_string_kv_perf) {
@@ -1316,6 +1378,49 @@ TEST(RangeLock, Basic) {
   m.lock(12288, 4096);
   m.unlock(4096, 8192);
   m.unlock(12288, 4096);
+}
+
+TEST(strBuilder, test) {
+    strBuider<64*1024> sb("asdf", "qwer"), sb250;
+    EXPECT_EQ(sb, "asdfqwer");
+    EXPECT_EQ(sb250, "");
+    sb += "hahaha";
+    EXPECT_EQ(sb, "asdfqwerhahaha");
+    sb + "123" + "!@#$" + "PWD";
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD");
+    sb.appends("(234)", "\n");
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n");
+    sb.append('\t');
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n\t");
+}
+
+DEFINE_CONST_STATIC_ORDERED_STRINGS(os, {"asdf", "qwer", "xzyh"});
+
+TEST(ordered_span, strings) {
+    EXPECT_EQ(os.count("asdf"), 1);
+    EXPECT_EQ(os.count("bbq"), 0);
+    EXPECT_EQ(os.count("qwer"), 1);
+    EXPECT_EQ(os.count("xzyh"), 1);
+    DEFINE_ORDERED_STRING_KV(oskv, {{"asdf", "1"}, {"qwer", "2"}, {"xzyh", "3"}});
+    for (auto s: os) {
+        EXPECT_NE(oskv[s], "");
+    }
+
+    DEFINE_APPENDABLE_ORDERED_STRING_KV(aoskv, 5, {{"asdf", "1"}, {"qwer", "2"}, {"xzyh", "3"}});
+    EXPECT_EQ(aoskv.size(), oskv.size());
+
+    auto it1 = oskv.begin(), it2 = aoskv.begin();
+    for (;it1 != oskv.end(); ++it1, ++it2) {
+        EXPECT_EQ(*it1, *it2);
+    }
+    EXPECT_EQ(it2, aoskv.end());
+
+    aoskv.insert({"bbq", "14ygrhe"});
+    aoskv.append({"zzz", "..."});
+    EXPECT_EQ(aoskv.size(), oskv.size() + 2);
+    std::vector<SKV> res(aoskv.begin(), aoskv.end()), truth ={
+        {"asdf", "1"}, {"bbq", "14ygrhe"}, {"qwer", "2"}, {"xzyh", "3"}, {"zzz", "..."}};
+    EXPECT_EQ(res, truth);
 }
 
 TEST(PooledAllocator, allocFailed) {
