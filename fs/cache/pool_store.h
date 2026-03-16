@@ -79,7 +79,9 @@ namespace fs
     class ICachePool : public Object
     {
     public:
-        ICachePool(uint32_t pool_size = 128, uint32_t max_refilling = 128, uint32_t refilling_threshold = -1U, bool pin_write = false);
+        ICachePool(uint32_t pool_size = 128, uint32_t max_refilling = 128,
+                   uint32_t refilling_threshold = -1U, bool pin_write = false,
+                   uint64_t store_cache_ttl_usecs = 10'000'000);
         ~ICachePool();
 
         ICacheStore* open(std::string_view filename, int flags, mode_t mode);
@@ -182,16 +184,21 @@ namespace fs
 
         void release(bool detach = false)
         {
-            SCOPED_LOCK(mt_);
-            if ((detach || need_detach_) && !detached_) {
-                detached_ = true;
-                pool_->store_release(this, true);
-            }
+            bool should_delete = false;
+            {
+                SCOPED_LOCK(mt_);
+                if ((detach || need_detach_) && !detached_) {
+                    detached_ = true;
+                    pool_->store_release(this, true);
+                }
 
-            auto ref = ref_.fetch_sub(1, std::memory_order_relaxed);
-            if (ref == 1 && pool_) {
-                if (!detached_) pool_->store_release(this); else delete this;
-            } else if (ref == 0) delete this;  // call do_open directly
+                auto ref = ref_.fetch_sub(1, std::memory_order_relaxed);
+                if (ref == 1 && pool_) {
+                    if (!detached_) pool_->store_release(this);
+                    else should_delete = true;
+                } else if (ref == 0) should_delete = true;  // call do_open directly
+            }
+            if (should_delete) delete this;
         }
 
         ssize_t pread(void *buf, size_t count, off_t offset)

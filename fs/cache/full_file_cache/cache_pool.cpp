@@ -37,8 +37,9 @@ const uint64_t kMaxFreeSpace = 50 * kGB;
 const int64_t kEvictionMark = 5ll * kGB;
 
 FileCachePool::FileCachePool(IFileSystem* mediaFs, uint64_t capacityInGB,
-    uint64_t periodInUs, uint64_t diskAvailInBytes, uint64_t refillUnit)
-    : ICachePool(0),
+    uint64_t periodInUs, uint64_t diskAvailInBytes, uint64_t refillUnit,
+    uint64_t storeCacheTTLUsecs)
+    : ICachePool(0, 128, -1U, false, storeCacheTTLUsecs),
       mediaFs_(mediaFs),
       capacityInGB_(capacityInGB),
       periodInUs_(periodInUs),
@@ -122,8 +123,31 @@ int FileCachePool::stat(CacheStat* stat, std::string_view pathname) {
 }
 
 int FileCachePool::evict(std::string_view filename) {
-  errno = ENOSYS;
-  return -1;
+  auto fileIter = fileIndex_.find(filename);
+  if (fileIter == fileIndex_.end()) {
+    LOG_ERROR("Evict no such file , name: `", filename);
+    return 0;
+  }
+
+  const auto& filePath = fileIter->first;
+  auto lruEntry = fileIter->second.get();
+  if (lruEntry->openCount == 0) {
+    lru_.mark_key_cleared(lruEntry->lruIter);
+  }
+  int err = 0;
+  {
+    photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+    err = mediaFs_->truncate(filePath.data(), 0);
+    lruEntry->truncate_done = false;
+  }
+  if (err) {
+    ERRNO e;
+    LOG_ERROR("truncate(0) failed, name: `, ret: `, error code: `", filePath,
+              err, e);
+    // If truncate fails, we can attempt to remove the file directly
+    // in the afterFtrucate function.
+  }
+  return afterFtrucate(fileIter) ? 0 : -1;
 }
 
 int FileCachePool::evict(size_t size) {
@@ -241,13 +265,6 @@ void FileCachePool::eviction() {
     if (err) {
       ERRNO e;
       LOG_ERROR("truncate(0) failed, name : `, ret : `, error code : `", fileName, err, e);
-      // truncate to 0 failed means unable to free the file, it should not consider as a part
-      // of cache. Deal as it already release.
-      // The only exception is errno EINTR, means truncate interrupted by signal, should try
-      // again
-      if (e.no == EINTR) {
-        continue;
-      }
     }
     afterFtrucate(fileIter);
     actualEvict -= fileSize;
@@ -269,16 +286,18 @@ bool FileCachePool::afterFtrucate(FileNameMap::iterator iter) {
   }
   if (0 == iter->second->openCount) {
     auto err = mediaFs_->unlink(iter->first.data());
-    ERRNO e;
-    LOG_ERROR("unlink failed, name : `, ret : `, error code : `", iter->first, err, e);
-    // unlik failed may caused by multiple reasons
-    // only EBUSY should may be able to trying to unlink again
-    // other reason should never try to clean it.
-    if (err && (e.no == EBUSY)) {
-      return false;
+    if (err) {
+      ERRNO e;
+      LOG_ERROR("unlink failed, name : `, ret : `, error code : `", iter->first, err, e);
+      // unlink failed may caused by multiple reasons
+      // only EBUSY should may be able to trying to unlink again
+      // other reason should never try to clean it.
+      if (err && (e.no == EBUSY)) {
+        return false;
+      }
+      lru_.remove(iter->second->lruIter);
+      fileIndex_.erase(iter);
     }
-    lru_.remove(iter->second->lruIter);
-    fileIndex_.erase(iter);
   }
   return true;
 }
