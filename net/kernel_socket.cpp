@@ -359,6 +359,7 @@ public:
             return nullptr;
         }
         if (m_opts.setsockopt(cfd) != 0) {
+            ::close(cfd);
             return nullptr;
         }
         return create_stream(cfd);
@@ -473,6 +474,9 @@ public:
             m_listen_fd = socket(AF_SMC, ver);
             if (m_listen_fd < 0) return -1;
         }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
+        }
         int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
         if (ret < 0)
             LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
@@ -499,6 +503,8 @@ protected:
 
     ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
         ssize_t n = photon::net::sendmsg(sockfd, message, flags | ZEROCOPY_FLAG, timeout);
+        if (n < 0)
+            return n;
         m_num_calls++;
         auto ret = zerocopy_confirm(sockfd, m_num_calls - 1, timeout);
         if (ret < 0)
@@ -719,6 +725,9 @@ public:
         m_listen_fd = fstack_socket(s.get_sockaddr()->sa_family, SOCK_STREAM, 0);   // already non-blocking and no-delay
         if (m_listen_fd < 0) {
             LOG_ERRNO_RETURN(0, -1, "fail to setup DPDK listen fd");
+        }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
         }
         int ret = fstack_bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
         if (ret < 0)

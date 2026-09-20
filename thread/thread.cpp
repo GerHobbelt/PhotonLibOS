@@ -391,6 +391,7 @@ namespace photon
             auto ret = q[0];
             if (q.size() == 1) {
                 q.pop_back();
+                ret->idx = -1;
                 return ret;
             }
             q[0] = q.back();
@@ -403,20 +404,21 @@ namespace photon
 
         int pop(thread *obj)
         {
-            if (obj->idx == -1) return -1;
-            if ((size_t)obj->idx == q.size() - 1){
+            auto id = obj->idx;
+            if (id == -1) return -1;
+            if ((size_t)id == q.size() - 1){
                 q.pop_back();
                 obj->idx = -1;
                 return 0;
             }
 
-            auto id = obj->idx;
             if (q.size() == 1) {
                 assert(id == 0);
                 q.pop_back();
+                obj->idx = -1;
                 return 0;
             }
-            q[obj->idx] = q.back();
+            q[id] = q.back();
             q[id]->idx = id;
             q.pop_back();
             if (!up(id)) down(id);
@@ -1565,10 +1567,10 @@ insert_list:
         return 0;
     }
 
-    void threads_create_join(uint64_t n,
+    uint64_t threads_create_join(uint64_t n,
         thread_entry start, void* arg, uint64_t stack_size)
     {
-        if (n == 0) return;
+        if (n == 0) return 0;
         thread* threads[32];
         thread** pthreads = threads;
         std::vector<thread*> _threads;
@@ -1577,16 +1579,18 @@ insert_list:
             _threads.resize(n);
             pthreads = &_threads[0];
         }
+        uint64_t created = 0;
         for (uint64_t i = 0; i < n; ++i)
         {
             auto th = thread_create(start, arg, stack_size);
             if (!th) break;
             thread_enable_join(th);
-            pthreads[i] = th;
+            pthreads[created++] = th;
         }
-        for (uint64_t i = 0; i < n; ++i) {
+        for (uint64_t i = 0; i < created; ++i) {
             thread_join(pthreads[i]);
         }
+        return created;
     }
 
     void Timer::stub()
@@ -2029,7 +2033,7 @@ insert_list:
             th->vcpu->nthreads--;
             th->vcpu = v;
             v->nthreads++;
-        } while (q.front()->allow_work_stealing());
+        } while (!q.empty() && q.front()->allow_work_stealing());
         return stolen.eject_whole();
     }
     inline __attribute__((always_inline))
@@ -2046,8 +2050,11 @@ insert_list:
         scoped_rwlock _(vcpu_t::vcpu_list_rwlock, RLOCK);
         auto u = vcpu->next();
         while (u != vcpu) {
-            if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING))
+            if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING)) {
+                SCOPED_LOCK(vcpu_t::vcpu_list_lock);
+                u = u->next();
                 continue;
+            }
             thread* th;
             if ((th = ws_scan_standbyq(vcpu, u)) || (th = ws_scan_runq(vcpu, u))) {
                 vcpu->idle_worker->insert_list_tail(th);
