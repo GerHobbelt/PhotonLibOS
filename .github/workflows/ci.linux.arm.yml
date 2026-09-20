@@ -1,7 +1,10 @@
 name: Linux ARM
 
+# Runs triggered by removing an irrelevant label would have all jobs skipped, but they
+# still enter the concurrency group and would cancel an in-progress CI run. Divert them
+# into a separate '-noop' group so they never interfere with real CI runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'unlabeled' && github.event.label.name != 'needs-manual-merge') && '-noop' || '' }}
   cancel-in-progress: true
 
 on:
@@ -13,24 +16,23 @@ jobs:
   arm-linux-build-and-test:
     name: gcc${{ matrix.gcc }}-C++${{ matrix.cxx }}
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-26.04-arm
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --shm-size 512m --privileged
+    runs-on: arc-runner-set-arm
     strategy:
       fail-fast: false
       matrix:
         include:
-          - gcc: 9
+          - gcc: 8
             cxx: 14
           - gcc: 9
+            cxx: 14
+          - gcc: 10
             cxx: 17
           - gcc: 11
-            cxx: 20
+            cxx: 17
           - gcc: 12
-            cxx: 23
+            cxx: 20
           - gcc: 13
-            cxx: 23
+            cxx: 20
           - gcc: 14
             cxx: 23
             run_test: true
@@ -45,7 +47,9 @@ jobs:
 
       - name: Build
         run: |
-          source /opt/rh/gcc-toolset-${{ matrix.gcc }}/enable
+          if [ "${{ matrix.gcc }}" != "8" ]; then
+            source /opt/rh/gcc-toolset-${{ matrix.gcc }}/enable
+          fi
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
                          -D PHOTON_CXX_STANDARD=${{ matrix.cxx }} \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \
@@ -54,6 +58,7 @@ jobs:
                          -D PHOTON_ENABLE_FUSE=ON         \
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_KCP=ON          \
                          -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1
 
