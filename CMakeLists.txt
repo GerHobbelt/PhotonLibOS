@@ -83,19 +83,22 @@ if (PHOTON_BUILD_WITH_ASAN)
 endif ()
 
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
+if (WIN32)
+    set(CMAKE_CXX_STANDARD 17)
+endif ()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# CMake has no built-in LINUX flag (unlike WIN32 / APPLE)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(LINUX TRUE)
+endif ()
+
 # CMake didn't provide an abstraction of optimization level for now.
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -DNDEBUG -g")
-set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2")    # Only for CI test
-if(CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
-endif()
-set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
-set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
-set(CMAKE_C_FLAGS_RELWITHDEBINFO ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
+set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -103,18 +106,22 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat -fno-omit-frame-pointer")
 endif()
-
+if (WIN32)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${PROJECT_SOURCE_DIR}/include -include ${PROJECT_SOURCE_DIR}/common/windows_compat.h -Wno-attributes -Wno-unused-value -Wno-array-bounds -Wno-sign-compare -Wno-narrowing -Wno-unused-variable -Wno-ignored-attributes")
+endif()
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
-    check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
-    if (COMPILER_HAS_MCRC32_FLAG)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
-    endif ()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16")
 elseif ((CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) OR (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char -fno-stack-protector -fno-omit-frame-pointer")
-    if (NOT CMAKE_CXX_FLAGS MATCHES "-march=|-mcpu=")
+    if (NOT CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc+crypto+lse")
     endif ()
 endif ()
+
+set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
+set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
+set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
+set(CMAKE_C_FLAGS_RELWITHDEBINFO ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
 
 # Default build type is Release
 if (NOT CMAKE_BUILD_TYPE)
@@ -217,10 +224,10 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         fs/virtual-file.cpp
         fs/xfile.cpp
         fs/httpfs/*.cpp
-        io/signal.cpp
         io/reset_handle.cpp
         net/*.cpp
         net/http/*.cpp
+        net/http/huffman/*.cpp
         net/http/websocket.cpp
         net/security-context/tls-stream.cpp
         net/vdma/*.cpp
@@ -229,7 +236,9 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         )
 
 if (APPLE)
-    list(APPEND PHOTON_SRC io/kqueue.cpp)
+    list(APPEND PHOTON_SRC io/kqueue.cpp io/signal.cpp)
+elseif (WIN32)
+    list(APPEND PHOTON_SRC io/iocp.cpp)
 else ()
     file(GLOB CACHE_SRC
         fs/cache/*.cpp
@@ -240,6 +249,7 @@ else ()
         io/aio-wrapper.cpp
         io/epoll.cpp
         io/epoll-ng.cpp
+        io/signal.cpp
         ${CACHE_SRC}
     )
     if (PHOTON_ENABLE_URING)
@@ -336,18 +346,22 @@ endif ()
 ################################################################################
 
 set(static_deps
-        easy_weak
-        fstack_weak
 )
+if (LINUX)
+    list(APPEND static_deps easy_weak fstack_weak)
+endif()
 set(shared_deps
         -lpthread
 )
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     list(APPEND shared_deps -lgcc)  # solve [hidden symbol `__cpu_model'] problem
 endif ()
-if (NOT APPLE)
+if (NOT APPLE AND NOT WIN32)
     list(APPEND static_deps ${AIO_LIBRARIES})
     list(APPEND shared_deps -lrt -ldl)
+endif ()
+if (WIN32)
+    list(APPEND shared_deps -lws2_32 -lmswsock -lcrypt32 -ladvapi32 -lgdi32 -luser32 -lbcrypt)
 endif ()
 if (PHOTON_ENABLE_URING)
     list(APPEND static_deps ${URING_LIBRARIES})
@@ -402,7 +416,9 @@ foreach (dep ${static_deps})
 endforeach ()
 
 set(version_scripts)
-list(APPEND version_scripts "-Wl,--version-script=${PROJECT_SOURCE_DIR}/tools/libaio.map")
+if (LINUX)
+    list(APPEND version_scripts "-Wl,--version-script=${PROJECT_SOURCE_DIR}/tools/libaio.map")
+endif ()
 
 ################################################################################
 
@@ -421,6 +437,27 @@ else ()
             PRIVATE -Wl,-force_load ${static_deps}
     )
 endif ()
+if (WIN32)
+    # Bake the MinGW runtime into libphoton.dll so the produced DLL has no
+    # external dependency on libgcc_s_seh-1.dll / libstdc++-6.dll /
+    # libwinpthread-1.dll.  Test and example executables that link against
+    # libphoton.dll can then run under wine from build-win/output/ without
+    # WINEPATH or extra DLL copies.
+    #
+    # libwinpthread needs its static archive referenced by absolute path
+    # wrapped in --whole-archive, otherwise ld auto-links libwinpthread.dll.a
+    # (the import lib) and the produced DLL ends up depending on the DLL.
+    execute_process(
+            COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libwinpthread.a
+            OUTPUT_VARIABLE MINGW_WINPTHREAD_STATIC
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+    target_link_options(photon_shared PRIVATE
+            -static-libgcc -static-libstdc++)
+    if (MINGW_WINPTHREAD_STATIC AND EXISTS "${MINGW_WINPTHREAD_STATIC}")
+        target_link_options(photon_shared PRIVATE
+                -Wl,--whole-archive,${MINGW_WINPTHREAD_STATIC},--no-whole-archive)
+    endif ()
+endif ()
 
 # Link photon static lib
 add_library(photon_static STATIC $<TARGET_OBJECTS:photon_obj>)
@@ -433,23 +470,50 @@ target_link_libraries(photon_static
 
 # Merge static libs into libphoton.a for manual distribution.
 # Do NOT link to this target directly.
-if (NOT APPLE)
+if (LINUX)
+    if (TARGET fstack_weak)
+        set(_extra_archives $<TARGET_FILE:fstack_weak>)
+    else ()
+        set(_extra_archives "")
+    endif ()
+    if (TARGET easy_weak)
+        set(_easy_archive $<TARGET_FILE:easy_weak>)
+    else ()
+        set(_easy_archive "")
+    endif ()
     add_custom_target(_photon_static_archive ALL
             COMMAND rm -rf libphoton.a
-            COMMAND ar -qcT libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
-            COMMAND ar -M < ${PROJECT_SOURCE_DIR}/tools/libphoton.mri
+            COMMAND ${CMAKE_AR} -qcT libphoton.a $<TARGET_FILE:photon_static> ${_easy_archive} ${_extra_archives}
+            COMMAND ${CMAKE_AR} -M < ${PROJECT_SOURCE_DIR}/tools/libphoton.mri
             DEPENDS photon_static
             WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
             VERBATIM
     )
 else ()
+    if (TARGET easy_weak)
+        set(_easy_archive $<TARGET_FILE:easy_weak>)
+    else ()
+        set(_easy_archive "")
+    endif ()
+    if (TARGET fstack_weak)
+        set(_extra_archives $<TARGET_FILE:fstack_weak>)
+    else ()
+        set(_extra_archives "")
+    endif ()
     add_custom_target(_photon_static_archive ALL
             COMMAND rm -rf libphoton.a
-            COMMAND libtool -static -o libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
+            COMMAND libtool -static -o libphoton.a $<TARGET_FILE:photon_static> ${_easy_archive} ${_extra_archives}
             DEPENDS photon_static
             WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
             VERBATIM
     )
+endif ()
+
+if (WIN32 AND PHOTON_BUILD_DEPENDENCIES)
+    # httpfs.cpp includes curl/curl.h; when we build libcurl statically from
+    # source, the headers must see CURL_STATICLIB or they declare functions
+    # with __declspec(dllimport), which the static libcurl.a can't satisfy.
+    target_compile_definitions(photon_obj PRIVATE CURL_STATICLIB)
 endif ()
 
 # Build examples and test cases
@@ -466,6 +530,7 @@ if (PHOTON_BUILD_TESTING)
 
     target_include_directories(photon_shared PUBLIC ${CURL_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
     target_link_libraries(photon_shared PUBLIC ${CURL_LIBRARIES} ${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES})
+    target_compile_definitions(photon_obj PRIVATE CURL_STATICLIB)
     link_libraries(ci-tools)
 
     add_subdirectory(common/checksum/test)

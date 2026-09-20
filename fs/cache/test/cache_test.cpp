@@ -17,7 +17,7 @@ limitations under the License.
 
 #include "../../../test/gtest.h"
 
-#include <fcntl.h>
+#include <sys/fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -48,9 +48,6 @@ namespace fs {
 
 // Cleanup and recreate the test dir
 inline void SetupTestDir(const std::string& dir) {
-  if (::access(dir.c_str(), F_OK) != 0) {
-    ::mkdir(dir.c_str(), 0755);
-  }
   std::string cmd = std::string("rm -r ") + dir;
   EXPECT_NE(-1, system(cmd.c_str()));
   cmd = std::string("mkdir -p ") + dir;
@@ -94,13 +91,13 @@ inline bool SkipIfFiemapSupported(ICacheStore* store) {
 
 void commonTest(bool cacheIsFull, bool enableDirControl, bool dirFull) {
   std::string prefix = "";
-  const size_t dirQuota = 32ul * 1024 * 1024;
+  const size_t dirQuota = 32ull * 1024 * 1024;
   const uint64_t refillSize = 1024 * 1024;
   if (enableDirControl) {
     prefix = "/John/bucket/";
   }
 
-  std::string root("/tmp/ease/cache/cache_test/");
+  std::string root("/mnt/tmp/ease/cache/cache_test/");
   SetupTestDir(root);
 
   std::string subDir = prefix + "dir/dir/";
@@ -111,7 +108,7 @@ void commonTest(bool cacheIsFull, bool enableDirControl, bool dirFull) {
   auto ok = ::stat(std::string(root + subDir + "testFile").c_str(), &st);
   EXPECT_EQ(0, ok);
 
-  std::string srcRoot("/tmp/ease/cache/src_test/");
+  std::string srcRoot("/mnt/tmp/ease/cache/src_test/");
   SetupTestDir(srcRoot);
   auto srcFs = new_localfs_adaptor(srcRoot.c_str(), ioengine_psync);
 
@@ -119,7 +116,7 @@ void commonTest(bool cacheIsFull, bool enableDirControl, bool dirFull) {
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(srcFs, alignFs, refillSize,
-      cacheIsFull ? 0 : 512, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, enableDirControl ? 2 : 0);
+      cacheIsFull ? 0 : 512, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, enableDirControl ? 2 : 0);
   auto cachePool = roCachedFs->get_pool();
 
   if (dirFull) {
@@ -245,7 +242,9 @@ void commonTest(bool cacheIsFull, bool enableDirControl, bool dirFull) {
     EXPECT_EQ(0, cachedFile->evict(0, kPageSize));
     struct stat st2;
     ::stat(std::string(root + prefix + "/testDir/file_1").c_str(), &st2);
+#ifdef __linux__
     EXPECT_EQ(kPageSize, st1.st_blocks * 512 - st2.st_blocks * 512);
+#endif
 
     // test refill last block
     src.clear();
@@ -408,7 +407,7 @@ TEST(RoCachedFs, BasicCacheFull) {
 // }
 
 TEST(RoCachedFs, CacheWithOutSrcFile) {
-  std::string root("/tmp/ease/cache/cache_test_no_src/");
+  std::string root("/mnt/tmp/ease/cache/cache_test_no_src/");
   SetupTestDir(root);
 
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
@@ -416,7 +415,7 @@ TEST(RoCachedFs, CacheWithOutSrcFile) {
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   DEFER(delete cacheAllocator);
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
-      512, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+      512, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
   DEFER(delete roCachedFs);
   auto cachedFile = static_cast<ICachedFile*>(roCachedFs->open(
       std::string("/testDir/file_1").c_str(), 0, 0644));
@@ -448,16 +447,16 @@ TEST(RoCachedFs, CacheWithOutSrcFile) {
 }
 
 TEST(RoCachedFS, xattr) {
-  std::string root("/tmp/ease/cache/cache_xattr/");
+  std::string root("/mnt/tmp/ease/cache/cache_xattr/");
   SetupTestDir(root);
 
   auto srcFs = new_localfs_adaptor();
   auto mediaFs = new_localfs_adaptor(root.c_str());
   auto roCachedFs = new_full_file_cached_fs(srcFs, mediaFs, 1024 * 1024, 512, 1000 * 1000 * 1,
-                                            128ul * 1024 * 1024, nullptr, 0);
+                                            128ull * 1024 * 1024, nullptr, 0);
   DEFER(delete roCachedFs);
 
-  std::string path = "/tmp/ease/cache/cache_xattr/filexattr";
+  std::string path = "/mnt/tmp/ease/cache/cache_xattr/filexattr";
   auto xttarFile = srcFs->open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
   DEFER(delete xttarFile);
   auto xattrFs = dynamic_cast<IFileSystemXAttr*>(roCachedFs);
@@ -468,7 +467,7 @@ TEST(RoCachedFS, xattr) {
   ret = xattrFs->listxattr(path.c_str(), key, 20);
   EXPECT_EQ(0, std::memcmp(key, name.data(), ret));
   ret = xattrFs->getxattr(path.c_str(), key, val, 20);
-  EXPECT_EQ((long int)value.size(), ret);
+  EXPECT_EQ((ssize_t)value.size(), ret);
   EXPECT_EQ(0, std::memcmp(val, value.data(), ret));
   ret = xattrFs->removexattr(path.c_str(), key);
   EXPECT_EQ(0, ret);
@@ -481,7 +480,7 @@ TEST(RoCachedFS, xattr) {
   ret = xattrfile->flistxattr(key, 20);
   EXPECT_EQ(0, std::memcmp(key, name.data(), ret));
   ret = xattrfile->fgetxattr(key, val, 20);
-  EXPECT_EQ((long int)value.size(), ret);
+  EXPECT_EQ((ssize_t)value.size(), ret);
   EXPECT_EQ(0, std::memcmp(val, value.data(), ret));
   ret = xattrfile->fremovexattr(key);
   EXPECT_EQ(0, ret);
@@ -495,14 +494,14 @@ void* worker(void* arg) {
   for (auto i = 0; i < 2048; i++) {
     offset.push_back(i * 1024 * 1024);
   }
-  auto fd = ::open("/tmp/ease/cache/src_test/huge", O_RDONLY);
+  auto fd = ::open("/mnt/tmp/ease/cache/src_test/huge", O_RDONLY);
   DEFER(::close(fd));
   auto f = fs->open("/huge", O_RDONLY);
   DEFER(delete f);
   for (int i=0;i<4;i++) {
     shuffle(offset.begin(), offset.end());
     for (const auto &x : offset) {
-      EXPECT_EQ((ssize_t)(1UL<<20), ::pread(fd, buffersrc, 1024*1024, x));
+      EXPECT_EQ((ssize_t)(1ULL<<20), ::pread(fd, buffersrc, 1024*1024, x));
       f->pread(buffer, 1024*1024, x);
       EXPECT_EQ(0, memcmp(buffer, buffersrc, 1024*1024));
       fs->get_pool()->evict();
@@ -513,16 +512,16 @@ void* worker(void* arg) {
 }
 
 TEST(CachedFS, write_while_full) {
-  std::string srcRoot("/tmp/ease/cache/src_test/");
+  std::string srcRoot("/mnt/tmp/ease/cache/src_test/");
   SetupTestDir(srcRoot);
-  EXPECT_NE(-1, system("dd if=/dev/urandom of=/tmp/ease/cache/src_test/huge bs=1M count=2048"));
+  EXPECT_NE(-1, system("dd if=/dev/urandom of=/mnt/tmp/ease/cache/src_test/huge bs=1M count=2048"));
 
-  std::string root("/tmp/ease/cache/cache_test/");
+  std::string root("/mnt/tmp/ease/cache/cache_test/");
   SetupTestDir(root);
   auto srcFs = new_localfs_adaptor(srcRoot.c_str());
   auto mediaFs = new_localfs_adaptor(root.c_str());
   auto roCachedFs = new_full_file_cached_fs(srcFs, mediaFs, 1024 * 1024, 1, 100 * 1000 * 1,
-                                            128ul * 1024 * 1024, nullptr, 0);
+                                            128ull * 1024 * 1024, nullptr, 0);
 
   std::vector<photon::join_handle*> jhs;
 
@@ -537,14 +536,14 @@ TEST(CachedFS, write_while_full) {
 }
 
 TEST(CachedFS, fn_trans_func) {
-  std::string srcRoot("/tmp/ease/cache/src_test/");
+  std::string srcRoot("/mnt/tmp/ease/cache/src_test/");
   SetupTestDir(srcRoot);
-  EXPECT_NE(-1, system("mkdir /tmp/ease/cache/src_test/path_aaa/"));
-  EXPECT_NE(-1, system("mkdir /tmp/ease/cache/src_test/path_bbb/"));
-  EXPECT_NE(-1, system("dd if=/dev/urandom of=/tmp/ease/cache/src_test/path_aaa/sha256:test bs=1K count=1"));
-  EXPECT_NE(-1, system("cp /tmp/ease/cache/src_test/path_aaa/sha256:test /tmp/ease/cache/src_test/path_bbb/sha256:test"));
+  EXPECT_NE(-1, system("mkdir /mnt/tmp/ease/cache/src_test/path_aaa/"));
+  EXPECT_NE(-1, system("mkdir /mnt/tmp/ease/cache/src_test/path_bbb/"));
+  EXPECT_NE(-1, system("dd if=/dev/urandom of=/mnt/tmp/ease/cache/src_test/path_aaa/sha256:test bs=1K count=1"));
+  EXPECT_NE(-1, system("cp /mnt/tmp/ease/cache/src_test/path_aaa/sha256:test /mnt/tmp/ease/cache/src_test/path_bbb/sha256:test"));
 
-  std::string root("/tmp/ease/cache/cache_test/");
+  std::string root("/mnt/tmp/ease/cache/cache_test/");
   SetupTestDir(root);
   auto srcFs = new_localfs_adaptor(srcRoot.c_str());
   DEFER(delete srcFs);
@@ -565,7 +564,7 @@ TEST(CachedFS, fn_trans_func) {
     }
   }cb;
   auto cachedFs = new_full_file_cached_fs(srcFs, mediaFs, 1024 * 1024, 1, 100 * 1000 * 1,
-                                          128ul * 1024 * 1024, nullptr, 0, {&cb, &NameTransCB::fn_trans_sha256});
+                                          128ull * 1024 * 1024, nullptr, 0, {&cb, &NameTransCB::fn_trans_sha256});
   DEFER(delete cachedFs);
   char buf1[1024], buf2[1024];
   auto cachedFile1 = static_cast<ICachedFile*>(cachedFs->open("/path_aaa/sha256:test", 0, 0644));
@@ -581,20 +580,20 @@ TEST(CachedFS, fn_trans_func) {
 }
 
 TEST(CachePool, evict_file) {
-  std::string root = "/tmp/ease/cache/evict_file_test/";
+  std::string root = "/mnt/tmp/ease/cache/evict_file_test/";
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
 
   auto fileName = "/file_to_evict";
   auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
   ASSERT_NE(nullptr, cacheStore);
-  
+
   const size_t bufSize = 1024 * 1024;
   IOVector buffer(*cacheAllocator);
   buffer.push_back(bufSize);
@@ -638,13 +637,13 @@ TEST(CachePool, evict_file) {
 }
 
 TEST(CachePool, random_evict_file) {
-  std::string root = "/tmp/ease/cache/random_evict_file_test/";
+  std::string root = "/mnt/tmp/ease/cache/random_evict_file_test/";
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
 
@@ -706,7 +705,7 @@ TEST(CachePool, random_evict_file) {
         EXPECT_EQ(qres.first, written);
         EXPECT_EQ(qres.second, size_t(qoffset + qsize - written));
       } else {
-        EXPECT_EQ(qres.second, 0UL);
+        EXPECT_EQ(qres.second, 0ULL);
         IOVector read_buffer(*cacheAllocator);
         read_buffer.push_back(qsize);
         ret = cacheStore->do_preadv2(read_buffer.iovec(), read_buffer.iovcnt(), qoffset, 0);
@@ -719,13 +718,13 @@ TEST(CachePool, random_evict_file) {
 }
 
 TEST(CachePool, open_same_file) {
-  std::string root = "/tmp/ease/cache/open_same_file/";
+  std::string root = "/mnt/tmp/ease/cache/open_same_file/";
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
 
@@ -789,7 +788,7 @@ static bool openClose(ICachePool* pool, const char* name) {
 }
 
 TEST(CachePool, test_demote_threshold) {
-  std::string root = "/tmp/ease/cache/test_demote_threshold/";
+  std::string root = "/mnt/tmp/ease/cache/test_demote_threshold/";
   SetupTestDir(root);
   const size_t demoteThreshold = 10;
   const size_t fileNum = 100;
@@ -798,7 +797,7 @@ TEST(CachePool, test_demote_threshold) {
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
   using T = FileCachePoolTest;
@@ -849,7 +848,7 @@ TEST(CachePool, test_demote_threshold) {
 }
 
 TEST(CachePool, three_tier_cascade) {
-  std::string root = "/tmp/ease/cache/three_tier_cascade/";
+  std::string root = "/mnt/tmp/ease/cache/three_tier_cascade/";
   SetupTestDir(root);
   const size_t activeLimit = 5;
   const size_t inactiveLimit = 10;
@@ -859,7 +858,7 @@ TEST(CachePool, three_tier_cascade) {
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
   using T = FileCachePoolTest;
@@ -968,7 +967,7 @@ TEST(CachePool, three_tier_cascade) {
 }
 
 TEST(CachePool, evict_by_size_cold_first) {
-  std::string root = "/tmp/ease/cache/evict_by_size_cold_first/";
+  std::string root = "/mnt/tmp/ease/cache/evict_by_size_cold_first/";
   SetupTestDir(root);
   const uint64_t capacityGB = 1;
   const size_t activeLimit = 5;
@@ -981,7 +980,7 @@ TEST(CachePool, evict_by_size_cold_first) {
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
-      capacityGB, 0, 128ul * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+      capacityGB, 0, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
   using T = FileCachePoolTest;
@@ -1062,7 +1061,7 @@ static int64_t get_physical_memory_KiB() {
 }
 
 TEST(CachePool, DISABLED_test_mem_usage) {
-  std::string root = "/tmp/ease/cache/test_mem_usage/";
+  std::string root = "/mnt/tmp/ease/cache/test_mem_usage/";
   SetupTestDir(root);
   const uint64_t capacityGB = 1;
   const size_t fileNum = 10'000'000;
@@ -1072,7 +1071,7 @@ TEST(CachePool, DISABLED_test_mem_usage) {
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
-      capacityGB, 0, 128ul * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+      capacityGB, 0, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
   using T = FileCachePoolTest;
@@ -1097,7 +1096,9 @@ TEST(CachePool, DISABLED_test_mem_usage) {
   EXPECT_EQ(fileNum - activeNum, T::inactive_size(pool) + T::idle_size(pool));
 
   photon::thread_sleep(10);
+#ifdef __linux__
   malloc_trim(0);
+#endif
   photon::thread_sleep(10);
 
   auto after_mem_usage = get_physical_memory_KiB();
@@ -1109,13 +1110,13 @@ TEST(CachePool, DISABLED_test_mem_usage) {
 static void refillRangeDeterministic(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_det/"
-      : "/root/tmp/ease/cache/refill_range_det/";
-  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
+      : "/mnt/tmp/ease/cache/refill_range_det/";
+  if (useShm && !RequireShmAvailable(144ull * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, mediaFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
 
@@ -1157,7 +1158,7 @@ static void refillRangeDeterministic(bool useShm) {
   // queryRefillRange(2MB, 1MB): fully covered
   auto r2 = cacheStore->queryRefillRange(2 * refillUnit, refillUnit);
   EXPECT_EQ(r2.first, 0);
-  EXPECT_EQ(r2.second, 0UL);
+  EXPECT_EQ(r2.second, 0ULL);
 
   // queryRefillRange(3MB, 3MB): first hole is [3MB, 5MB)
   auto r3 = cacheStore->queryRefillRange(3 * refillUnit, 3 * refillUnit);
@@ -1167,7 +1168,7 @@ static void refillRangeDeterministic(bool useShm) {
   // queryRefillRange(5MB, 1MB): fully covered
   auto r4 = cacheStore->queryRefillRange(5 * refillUnit, refillUnit);
   EXPECT_EQ(r4.first, 0);
-  EXPECT_EQ(r4.second, 0UL);
+  EXPECT_EQ(r4.second, 0ULL);
 
   // queryRefillRange(6MB, 4MB): all hole
   auto r5 = cacheStore->queryRefillRange(6 * refillUnit, 4 * refillUnit);
@@ -1180,13 +1181,13 @@ static void refillRangeDeterministic(bool useShm) {
 static void refillRangeRandom(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_rand/"
-      : "/root/tmp/ease/cache/refill_range_rand/";
-  if (useShm && !RequireShmAvailable(240ul * 1024 * 1024)) return;
+      : "/mnt/tmp/ease/cache/refill_range_rand/";
+  if (useShm && !RequireShmAvailable(240ull * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, mediaFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
 
@@ -1266,13 +1267,13 @@ static void refillRangeRandom(bool useShm) {
 static void refillRangeEvictWhileOpen(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_evict/"
-      : "/root/tmp/ease/cache/refill_range_evict/";
-  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
+      : "/mnt/tmp/ease/cache/refill_range_evict/";
+  if (useShm && !RequireShmAvailable(144ull * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, mediaFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
 
@@ -1306,7 +1307,7 @@ static void refillRangeEvictWhileOpen(bool useShm) {
   // Verify: queryRefillRange(3MB, 2MB) -> fully covered
   auto r2 = cacheStore->queryRefillRange(3 * refillUnit, 2 * refillUnit);
   EXPECT_EQ(r2.first, 0);
-  EXPECT_EQ(r2.second, 0UL);
+  EXPECT_EQ(r2.second, 0ULL);
 
   // Evict without releasing cacheStore
   EXPECT_EQ(0, cachePool->evict(fileName));
@@ -1333,7 +1334,7 @@ static void refillRangeEvictWhileOpen(bool useShm) {
   // Verify: queryRefillRange(1MB, 1MB) -> fully covered
   auto r5 = cacheStore->queryRefillRange(1 * refillUnit, refillUnit);
   EXPECT_EQ(r5.first, 0);
-  EXPECT_EQ(r5.second, 0UL);
+  EXPECT_EQ(r5.second, 0ULL);
 
   // Verify: queryRefillRange(2MB, 3MB) -> [2MB, 5MB) all hole
   auto r6 = cacheStore->queryRefillRange(2 * refillUnit, 3 * refillUnit);
@@ -1346,13 +1347,13 @@ static void refillRangeEvictWhileOpen(bool useShm) {
 static void refillRangeNonAlignedTail(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_unaligned/"
-      : "/root/tmp/ease/cache/refill_range_unaligned/";
-  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
+      : "/mnt/tmp/ease/cache/refill_range_unaligned/";
+  if (useShm && !RequireShmAvailable(144ull * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   auto roCachedFs = new_full_file_cached_fs(nullptr, mediaFs, 1024 * 1024,
-      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
   DEFER({ delete cacheAllocator; delete roCachedFs; });
 
@@ -1385,18 +1386,18 @@ static void refillRangeNonAlignedTail(bool useShm) {
   // beyond-EOF space is misidentified as a hole → returns {2MB, 1MB}.
   auto r1 = cacheStore->queryRefillRange(0, static_cast<size_t>(fileSize));
   EXPECT_EQ(r1.first, 0);
-  EXPECT_EQ(r1.second, 0UL);
+  EXPECT_EQ(r1.second, 0ULL);
 
   // Query the partial-block tail [2MB, 2MB+5000) — should be fully covered.
   auto r2 = cacheStore->queryRefillRange(2 * refillUnit, tailSize);
   EXPECT_EQ(r2.first, 0);
-  EXPECT_EQ(r2.second, 0UL);
+  EXPECT_EQ(r2.second, 0ULL);
 
   // Query the last 4K block straddling the partial tail [2MB-4096, 2MB+5000):
   // all within the filled region, should be fully covered.
   auto r3 = cacheStore->queryRefillRange(2 * refillUnit - 4096, 4096 + tailSize);
   EXPECT_EQ(r3.first, 0);
-  EXPECT_EQ(r3.second, 0UL);
+  EXPECT_EQ(r3.second, 0ULL);
 
   // Now evict [1MB, 2MB) to create a hole before the tail.
   EXPECT_EQ(0, cacheStore->evict(1 * refillUnit, refillUnit));
@@ -1429,6 +1430,50 @@ TEST(CachePool, refill_range_evict_while_open) {
 TEST(CachePool, refill_range_non_aligned_tail) {
   refillRangeNonAlignedTail(true);
   refillRangeNonAlignedTail(false);
+}
+
+TEST(CachePool, eviction_with_deleted_cache_dir) {
+  std::string root = "/mnt/tmp/ease/cache/evict_dir_deleted/";
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  // capacity=1GB (waterMark≈900MB, riskMark≈950MB), short store TTL (1ms)
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 100 * 1000 * 1000, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  const size_t fileSize = 100 * 1024 * 1024;
+  IOVector buffer(*cacheAllocator);
+  buffer.push_back(fileSize);
+
+  // Phase 1: write 600MB (below riskMark, no eviction yet)
+  for (int i = 0; i < 6; i++) {
+    std::string name = "/file_" + std::to_string(i);
+    auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, store);
+    store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    store->release();
+  }
+
+  // Wait for first batch stores to expire from ObjectCache
+  photon::thread_usleep(100 * 1000);
+
+  // Externally delete all cached files
+  std::string cmd = "rm -rf " + root + "*";
+  ASSERT_NE(-1, system(cmd.c_str()));
+
+  // Phase 2: keep writing — totalUsed_ will exceed riskMark (~950MB),
+  // updateSpace triggers eviction which tries to open the deleted files.
+  // Must not crash.
+  for (int i = 6; i < 12; i++) {
+    std::string name = "/file_" + std::to_string(i);
+    auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, store);
+    store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    store->release();
+  }
 }
 
 }

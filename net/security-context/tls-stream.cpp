@@ -77,7 +77,7 @@ public:
         OpenSSL_add_all_ciphers();
         OpenSSL_add_all_digests();
         OpenSSL_add_all_algorithms();
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000LL
         mtx.clear();
         for (int i = 0; i < CRYPTO_num_locks(); i++) {
             mtx.emplace_back(std::make_unique<photon::mutex>());
@@ -88,7 +88,7 @@ public:
     }
 
     ~GlobalSSLContext() {
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000LL
         CRYPTO_set_id_callback(NULL);
         CRYPTO_set_locking_callback(NULL);
 #endif
@@ -339,7 +339,7 @@ public:
     SSL* ssl;
     BIO* ssbio;
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000LL
     static void* BIO_get_data(BIO* b) { return b->ptr; }
 
     static void BIO_set_data(BIO* b, void* ptr) { b->ptr = ptr; }
@@ -392,12 +392,8 @@ public:
 
 #endif
 
-    struct BIOMethodDeleter {
-        void operator()(BIO_METHOD* ptr) { BIO_meth_free(ptr); }
-    };
-
     static BIO_METHOD* BIO_s_sockstream() {
-        static std::unique_ptr<BIO_METHOD, BIOMethodDeleter> meth([] {
+        static BIO_METHOD* const meth = [] {
             auto m = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "BIO_PHOTON_SOCKSTREAM");
             BIO_meth_set_write(m, &TLSSocketStream::ssbio_bwrite);
             BIO_meth_set_read(m, &TLSSocketStream::ssbio_bread);
@@ -406,8 +402,8 @@ public:
             BIO_meth_set_create(m, &TLSSocketStream::ssbio_create);
             BIO_meth_set_destroy(m, &TLSSocketStream::ssbio_destroy);
             return m;
-        }());
-        return meth.get();
+        }();
+        return meth;
     }
 
     static ISocketStream* get_bio_sockstream(BIO* b) {
@@ -471,7 +467,12 @@ public:
         switch (r) {
             case SecurityRole::Client:
                 SSL_set_connect_state(ssl);
-                break;
+                // Defer the handshake to the first I/O. The SNI hostname is set
+                // via tls_stream_set_hostname() AFTER construction, and it must be
+                // carried in the ClientHello; handshaking here would send the
+                // ClientHello without SNI. SSL_read/SSL_write drives the client
+                // handshake once SNI has been set.
+                return;
             case SecurityRole::Server:
                 SSL_set_accept_state(ssl);
                 break;
@@ -583,7 +584,7 @@ ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
 };
 
 void tls_stream_set_hostname(ISocketStream* stream, const char* hostname) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+#if OPENSSL_VERSION_NUMBER >= 0x10100000LL
     if (auto s1 = dynamic_cast<TLSSocketStream*>(stream)) {
         if (SSL_set_tlsext_host_name(s1->ssl, hostname) != 1)
             LOG_ERROR("Failed to set hostname on tls stream: `", VALUE(hostname));

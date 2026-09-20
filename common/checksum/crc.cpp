@@ -670,6 +670,11 @@ uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
 
 
 #ifdef __x86_64__
+#ifdef __APPLE__ // apple basically doens't support avx-512
+uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
+    return crc64ecma_hw_sse128(buf, len, crc);
+}
+#else
 #ifdef __clang__
 #pragma clang attribute pop
 #pragma clang attribute push (__attribute__((target("crc32,sse4.1,pclmul,avx512f,avx512dq,avx512vl,vpclmulqdq"))), apply_to=function)
@@ -679,31 +684,36 @@ uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
 #endif
 // crc64_rk512 accessor is in crc_tables.h
 
-using v512 = __m512i_u;
-inline __attribute__((always_inline))
+#if !defined(__OPTIMIZE__)
+# define PHOTON_CRC512_INLINE inline
+#else
+# define PHOTON_CRC512_INLINE inline __attribute__((always_inline))
+#endif
+
+using v512 = __m512i;
+PHOTON_CRC512_INLINE
 v512 fold512(v512 a, v512 b) {
     auto x = _mm512_clmulepi64_epi128(a, b, 0x01);
     auto y = _mm512_clmulepi64_epi128(a, b, 0x10);
     return x ^ y;
 };
 
-inline __attribute__((always_inline))
+PHOTON_CRC512_INLINE
 v512 fold512(v512 a, v512 b, v512 c) {
     auto x = _mm512_clmulepi64_epi128(a, b, 0x01);
     auto y = _mm512_clmulepi64_epi128(a, b, 0x10);
     return   _mm512_ternarylogic_epi64(x, y, c, 0x96);
 };
 
-inline __attribute__((always_inline))
+PHOTON_CRC512_INLINE
 v512 fold512(v512 a, v512 b, const v512* c) {
     return fold512(a, b, _mm512_loadu_si512(c));
 }
 
-inline __attribute__((always_inline))
+PHOTON_CRC512_INLINE
 __m128i crc64ecma_hw_big_avx512(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
     assert(nbytes >= 256);
-    __attribute__((aligned(16)))
-    v512 crc0 = {(long)crc};
+    v512 crc0 = _mm512_set1_epi64((long long)crc);
     auto& ptr = (const v512*&)data;
     auto zmm0 = _mm512_loadu_si512(ptr++); zmm0 ^= crc0;
     auto zmm4 = _mm512_loadu_si512(ptr++);
@@ -746,6 +756,8 @@ uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
 #else // __GNUC__
 #pragma GCC pop_options
 #endif
+
+#endif  // apple
 #endif  // __x86_64__
 
 uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {

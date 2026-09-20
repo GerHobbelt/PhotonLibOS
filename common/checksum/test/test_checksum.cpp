@@ -122,24 +122,24 @@ TEST(TestChecksum, crc32c_hw_small) {
     do_test_crc_small(crc32c_sw, crc32c_hw_portable, 0, 4000);
 }
 
-void do_perf_crc(const char* name, CRC32C crc32c, unsigned long size) {
-    const unsigned long SIZE = 1 * 1024 * 1024 * 1024;
+void do_perf_crc(const char* name, CRC32C crc32c, uint64_t size) {
+    const uint64_t SIZE = 1 * 1024 * 1024 * 1024;
     __attribute__((aligned(16)))
     static unsigned char buf[SIZE+1];
     if (size > SIZE) size = SIZE;
     memset(buf+1, 0, size);
     auto start = std::chrono::system_clock::now();
-    unsigned long rounds = SIZE / size * 10;
+    uint64_t rounds = SIZE / size * 10;
     for (auto i = rounds; i; --i) {
         crc32c(buf+1, size, 0); // test for memory un-alignment
     }
-    unsigned long time_cost = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - start).count();
+    int64_t time_cost = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - start).count();
     auto perf = size * rounds / (double(time_cost) / 1000 / 1000) / 1024 / 1024 / 1024;
-    printf("%s (%lu bytes * %lu rounds = %lu GB), time spent: %lu us (%0.2f GB/s)\n",
-        name, size, rounds, rounds * size / SIZE, time_cost, perf);
+    printf("%s (%llu bytes * %llu rounds = %llu GB), time spent: %lld us (%0.2f GB/s)\n",
+        name, (unsigned long long)size, (unsigned long long)rounds, (unsigned long long)(rounds * size / SIZE), (long long)time_cost, perf);
 }
 
-inline void do_perf_crc(const char* name, CRC64ECMA crc64ecma, unsigned long size) {
+inline void do_perf_crc(const char* name, CRC64ECMA crc64ecma, uint64_t size) {
     return do_perf_crc(name, (CRC32C&)crc64ecma, size);
 }
 
@@ -169,7 +169,7 @@ TEST(Perf, crc32c_sw) {
 
 void do_test64(const char* name, CRC64ECMA crc64ecma) {
     auto start = std::chrono::system_clock::now();
-    for (int i = 0; i < 100; ++i)
+    // for (int i = 0; i < 100; ++i)
     for (auto& c: cases) {
         auto crc64 = crc64ecma((uint8_t*)c.s.data(), c.s.length(), 0);
         if (crc64 != c.crc64ecma) puts(c.s.data());

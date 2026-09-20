@@ -73,7 +73,7 @@ FileCachePool::~FileCachePool() {
 void FileCachePool::Init() {
   probeFiemap();
   traverseDir("/");
-  timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8UL * 1024 * 1024);
+  timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8ULL * 1024 * 1024);
 }
 
 void FileCachePool::probeFiemap() {
@@ -187,8 +187,8 @@ int FileCachePool::evict(std::string_view filename) {
     lru_.mark_key_cleared(lruEntry->lruIter);
   }
   int err = 0;
-  {
-    auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  if (cacheStore) {
     DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     err = cacheStore->evict(0);
@@ -231,13 +231,10 @@ void FileCachePool::updateLru(FileNameMap::iterator iter) {
 }
 
 //  currently, we exist duplicate pwrite
-uint64_t FileCachePool::updateSpace(FileNameMap::iterator iter, uint64_t size) {
+int64_t FileCachePool::updateSpace(FileNameMap::iterator iter, uint64_t size) {
   auto lruEntry = iter->second.get();
-  uint64_t diff = 0;
-  if (size > lruEntry->size) {
-    diff = size - lruEntry->size;
-    totalUsed_ += diff;
-  }
+  auto diff = static_cast<int64_t>(size) - static_cast<int64_t>(lruEntry->size);
+  totalUsed_ += diff;  
   lruEntry->size = size;
   if (totalUsed_ >= riskMark_) {
     LOG_WARN("pwrite is so heavy, totalUsed:`,riskMark:` || lruEntry->size = `",totalUsed_, riskMark_, lruEntry->size);
@@ -312,6 +309,7 @@ void FileCachePool::eviction() {
     LOG_AUDIT("eviction", VALUE(actualEvict), VALUE(evictByCache), VALUE(evictByDisk), VALUE(totalUsed_));
   }
 
+  uint64_t empty_files_sequence = 0;
   while (actualEvict > 0 && !lru_.empty() && !exit_) {
     auto fileIter = lru_.back();
     const auto& fileName = fileIter->first;
@@ -326,12 +324,22 @@ void FileCachePool::eviction() {
     if (0 == fileSize) {
         if (0 == fileIter->second->openCount) {
             afterFtrucate(fileIter);
+        } else {
+          empty_files_sequence++;
+          if (empty_files_sequence == lru_.size()) {
+            LOG_ERROR("eviction: all ` LRU entries have size=0 with openCount>0, "
+              "cannot make progress. actualEvict=`, totalUsed=`",
+              lru_.size(), actualEvict, totalUsed_);
+            break;
+          }
         }
         continue;
     }
 
-    {
-      auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+    empty_files_sequence = 0;
+    int err = 0;
+    auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+    if (cacheStore) {
       DEFER(cacheStore->release());
       photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
       err = cacheStore->evict(0);

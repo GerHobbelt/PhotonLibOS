@@ -145,19 +145,6 @@ struct RSockFD {
         return 0;
     }
 
-    template <int EVENT, typename FUNC, typename... ARGS>
-    ssize_t do_io_fully_action(uint64_t t, FUNC f, size_t n, ARGS... args) {
-        Timeout tmo(t);
-        ssize_t x = 0;
-        while (x < (ssize_t)n) {
-            auto ret = do_io_action<EVENT>(tmo.timeout(), f, args...);
-            if (ret < 0) return ret;
-            if (ret == 0) return x;
-            x += ret;
-        }
-        return x;
-    }
-
     ssize_t recv(uint64_t timeout, void* buf, size_t count, int flags = 0) {
         return do_io_action<POLLIN>(timeout, rrecv, buf, count, flags);
     }
@@ -167,13 +154,18 @@ struct RSockFD {
         return do_io_action<POLLIN>(timeout, rrecvmsg, msg, flags);
     }
     ssize_t read(uint64_t timeout, void* buf, size_t count) {
-        return do_io_fully_action<POLLIN>(timeout, rrecv, count, buf, count, 0);
+        Timeout tmo(timeout);
+        return DOIO_LOOP(
+            do_io_action<POLLIN>(tmo.timeout(), rrecv, buf, count, 0),
+            BufStep(buf, count));
     }
     ssize_t readv(uint64_t timeout, const struct iovec* iov, int iovcnt) {
-        iovector_view viov{(iovec*)iov, iovcnt};
-        tmp_msg_hdr msg(viov);
-        return do_io_fully_action<POLLIN>(timeout, rrecvmsg, viov.sum(), msg,
-                                          0);
+        SmartCloneIOV<8> clone(iov, iovcnt);
+        iovector_view view(clone.ptr, iovcnt);
+        Timeout tmo(timeout);
+        return DOIO_LOOP(
+            do_io_action<POLLIN>(tmo.timeout(), rrecvmsg, tmp_msg_hdr(view), 0),
+            BufStepV(view));
     }
     ssize_t send(uint64_t timeout, const void* buf, size_t count,
                  int flags = 0) {
@@ -185,14 +177,18 @@ struct RSockFD {
         return do_io_action<POLLOUT>(timeout, rsendmsg, msg, flags);
     }
     ssize_t write(uint64_t timeout, const void* buf, size_t count) {
-        return do_io_fully_action<POLLOUT>(timeout, rsend, count, buf, count,
-                                           0);
+        Timeout tmo(timeout);
+        return DOIO_LOOP(
+            do_io_action<POLLOUT>(tmo.timeout(), rsend, buf, count, 0),
+            BufStep((void*&)buf, count));
     }
     ssize_t writev(uint64_t timeout, const struct iovec* iov, int iovcnt) {
-        iovector_view viov{(iovec*)iov, iovcnt};
-        tmp_msg_hdr msg(viov);
-        return do_io_fully_action<POLLOUT>(timeout, rsendmsg, viov.sum(), msg,
-                                           0);
+        SmartCloneIOV<8> clone(iov, iovcnt);
+        iovector_view view(clone.ptr, iovcnt);
+        Timeout tmo(timeout);
+        return DOIO_LOOP(
+            do_io_action<POLLOUT>(tmo.timeout(), rsendmsg, tmp_msg_hdr(view), 0),
+            BufStepV(view));
     }
     int shutdown(ShutdownHow how) {
         return rshutdown(fd, static_cast<int>(how));
@@ -256,7 +252,7 @@ struct RSockFD {
 class RSocketStream : public photon::net::ISocketStream {
 public:
     RSockFD rfd;
-    uint64_t m_timeout = -1UL;
+    uint64_t m_timeout = -1ULL;
 
     explicit RSocketStream(RSockFD&& fd) : rfd(std::move(fd)) {}
 
@@ -367,7 +363,7 @@ public:
 
 class RSocketClient : public photon::net::ISocketClient {
 public:
-    uint64_t m_timeout = -1UL;
+    uint64_t m_timeout = -1ULL;
     SockOptBuffer m_opts;
 
     photon::net::ISocketStream* connect(const char* path,
@@ -422,7 +418,7 @@ public:
     bool waiting = false;
     Handler m_handler;
     std::atomic<photon::thread*> workth{};
-    uint64_t m_timeout = -1UL;
+    uint64_t m_timeout = -1ULL;
     ~RSocketServer() override { terminate(); }
     int bind(const EndPoint& ep) override { return rfd.bind(ep); }
     int bind(const char* path, size_t count) override {

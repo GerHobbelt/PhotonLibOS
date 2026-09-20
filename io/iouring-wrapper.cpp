@@ -82,8 +82,7 @@ public:
         if (kernel_version_compare("5.11", compare_result) == 0 && compare_result <= 0) {
             rlimit resource_limit{.rlim_cur = RLIM_INFINITY, .rlim_max = RLIM_INFINITY};
             if (setrlimit(RLIMIT_MEMLOCK, &resource_limit) != 0)
-                LOG_ERROR_RETURN(0, -1, "iouring: failed to set resource limit. "
-                                        "Use command `ulimit -l unlimited`, or change to root");
+                LOG_WARN(0, -1, "iouring: failed to set resource limit. ` Use command 'ulimit -l unlimited', or change to root", ERRNO());
         }
 
         check_register_file_support();
@@ -569,8 +568,8 @@ private:
     }
 
     __kernel_timespec usec_to_timespec(int64_t usec) {
-        int64_t sec = usec / 1000000L;
-        long long nsec = (usec % 1000000L) * 1000L;
+        int64_t sec = usec / 1000000LL;
+        long long nsec = (usec % 1000000LL) * 1000LL;
         return {sec, nsec};
     }
 

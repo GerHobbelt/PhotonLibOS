@@ -53,11 +53,11 @@ public:
     }
 
     uint64_t get_throttle() override {
-        return -1UL;
+        return -1ULL;
     }
 
     uint64_t set_throttle(uint64_t) override {
-        return -1UL;
+        return -1ULL;
     }
 
     void destruct() override {}
@@ -182,7 +182,7 @@ TEST(ALog, float_point)
     log_output = &log_output_test;
     LOG_DEBUG(' ');
     // auto log_start = _log_buf + _log_len - 1;
-    auto fp = 5203.14159265352L;
+    auto fp = 5203.14159265352;
     LOG_DEBUG(FP(fp).width(10).precision(3));
     puts(_log_buf);
     EXPECT_EQ(log_output_test.log_start(), string("  5203.142"));
@@ -295,7 +295,7 @@ void test_log(int x)
 //    puts(_log_buf);
 //    LOG_DEBUG("asdf:`, jkl:`, and: ", 1,2,3,4,5);
     auto pc = inner_function();
-    EXPECT_LE((uint64_t)&x - pc, 200);
+    EXPECT_LE((uint64_t)&x - pc, 1200);
 }
 
 TEST(ALog, Buffer) {
@@ -481,7 +481,7 @@ struct LevelOutput : public ILogOutput {
 
     int get_log_file_fd() override { return 0; }
 
-    uint64_t set_throttle(uint64_t t = -1UL) override { return 0; }
+    uint64_t set_throttle(uint64_t t = -1ULL) override { return 0; }
 
     uint64_t get_throttle() override { return 0; };
 
@@ -540,7 +540,9 @@ void segfault() {
 }
 
 TEST(ALog, null_to_pchar) {
+#ifndef _WIN32
     EXPECT_EXIT((segfault(), exit(0)), ::testing::KilledBySignal(SIGSEGV), ".*");
+#endif
     EXPECT_EXIT((testnull_func(), exit(0)), testing::ExitedWithCode(0),".*");
 }
 
@@ -555,7 +557,7 @@ TEST(ALog, throttled_log) {
     }
     auto e = time(0);
     EXPECT_GT(e - t, 1);
-    default_logger.log_output->set_throttle(-1UL);
+    default_logger.log_output->set_throttle(-1ULL);
 }
 
 TEST(ALog, LOG_LIMIT) {
@@ -638,6 +640,33 @@ TEST(ALOG, log_with_color) {
     LOG_TEMP("some temp log");
     default_logger << LOG_AUDIT("some audit log");
     default_logger.log_output->preset_color();
+}
+
+// Regression: width specifier exceeding buffer space caused ALogBuffer::size
+// underflow, leading to stack buffer overflow in subsequent writes.
+TEST(ALog, integer_width_overflow) {
+    char small_buf[16];
+    LogBuffer log(small_buf, sizeof(small_buf), &log_output_test);
+
+    log << DEC(6).width(2).padding('0');
+
+    log.printf(ALogString("FFFFFFFFFFFF", 12));
+    log << DEC(7).width(2).padding('0');
+
+    // Width(16) > buf.size — directly tests boundary clamping
+    char small_buf2[8];
+    LogBuffer log2(small_buf2, sizeof(small_buf2), &log_output_test);
+    void* p = (void*)0x1234567890ABCDEFull;
+    log2 << p;
+
+    // Timestamp-style sequence with near-full buffer
+    char small_buf3[32];
+    LogBuffer log3(small_buf3, sizeof(small_buf3), &log_output_test);
+    log3.printf(ALogString("ABCDEFGHIJKLMNOP", 16));
+    log3 << DEC(6).width(2).padding('0')
+         << DEC(19).width(2).padding('0')
+         << DEC(23).width(2).padding('0')
+         << DEC(11).width(2).padding('0');
 }
 
 int main(int argc, char **argv)

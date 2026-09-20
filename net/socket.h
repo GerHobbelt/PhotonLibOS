@@ -15,6 +15,17 @@ limitations under the License.
 */
 
 #pragma once
+// IPAddr is a packed struct whose `addr` member sits at offset 0 of an
+// anonymous packed union.  On Windows (MinGW), the _in_addr_word() helper
+// takes its address (via _in_addr_word_helper), which triggers
+// -Waddress-of-packed-member.  The field is actually aligned (offset 0
+// modulo any alignment), so the warning is spurious.  On Linux/macOS,
+// _in_addr_word() expands to a plain array access and never takes an
+// address — so the warning doesn't fire there, and an unguarded pragma
+// would trigger -Wpragmas (unknown option), breaking -Werror builds.
+#if defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))
+#pragma GCC diagnostic ignored "-Waddress-of-packed-member"
+#endif
 #include <cinttypes>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -26,12 +37,6 @@ limitations under the License.
 #include <photon/common/callback.h>
 #include <photon/common/object.h>
 #include <photon/common/string_view.h>
-
-#ifdef __linux__
-#define _in_addr_field s6_addr32
-#else // macOS
-#define _in_addr_field __u6_addr.__u6_addr32
-#endif
 
 struct LogBuffer;
 LogBuffer& operator << (LogBuffer& log, const in_addr& iaddr);
@@ -59,10 +64,10 @@ namespace net {
         }
         // V6 constructor (Network byte order)
         IPAddr(uint32_t nl1, uint32_t nl2, uint32_t nl3, uint32_t nl4) {
-            addr._in_addr_field[0] = nl1;
-            addr._in_addr_field[1] = nl2;
-            addr._in_addr_field[2] = nl3;
-            addr._in_addr_field[3] = nl4;
+            _in_addr_word(addr, 0) = nl1;
+            _in_addr_word(addr, 1) = nl2;
+            _in_addr_word(addr, 2) = nl3;
+            _in_addr_word(addr, 3) = nl4;
         }
         // V4 constructor (Internet Address)
         explicit IPAddr(in_addr internet_addr) {
@@ -87,9 +92,9 @@ namespace net {
         }
         // Check if it's actually an IPv4 address mapped in IPV6
         bool is_ipv4() const {
-            return addr._in_addr_field[0] == 0 &&
-                   addr._in_addr_field[1] == 0 &&
-                   addr._in_addr_field[2] == htonl(0x0000ffff);
+            return _in_addr_word(addr, 0) == 0 &&
+                   _in_addr_word(addr, 1) == 0 &&
+                   _in_addr_word(addr, 2) == htonl(0x0000ffff);
         }
         bool is_ipv6() const {
             return !is_ipv4();
@@ -103,7 +108,7 @@ namespace net {
         // Should ONLY be used for IPv4 address
         uint32_t to_nl() const {
             assert(is_ipv4());
-            return addr._in_addr_field[3];
+            return _in_addr_word(addr, 3);
         }
         bool is_loopback() const {
             return is_ipv4() ? mem_equal(V4Loopback()) : mem_equal(V6Loopback());
@@ -119,7 +124,7 @@ namespace net {
             if (is_ipv4()) {
                 return (to_nl() & htonl(0xffff0000)) == htonl(0xa9fe0000);
             } else {
-                return (addr._in_addr_field[0] & htonl(0xffc00000)) == htonl(0xfe800000);
+                return (_in_addr_word(addr, 0) & htonl(0xffc00000)) == htonl(0xfe800000);
             }
         }
         bool operator==(const IPAddr& rhs) const {
@@ -145,10 +150,10 @@ namespace net {
             map_v4(addr_.s_addr);
         }
         void map_v4(uint32_t nl) {
-            addr._in_addr_field[0] = 0x00000000;
-            addr._in_addr_field[1] = 0x00000000;
-            addr._in_addr_field[2] = htonl(0xffff);
-            addr._in_addr_field[3] = nl;
+            _in_addr_word(addr, 0) = 0x00000000;
+            _in_addr_word(addr, 1) = 0x00000000;
+            _in_addr_word(addr, 2) = htonl(0xffff);
+            _in_addr_word(addr, 3) = nl;
         }
     };
 
@@ -267,6 +272,21 @@ namespace net {
         virtual void timeout(uint64_t) = 0;
     };
 
+    class ISocketPool : public ISocketClient {
+    public:
+        using ISocketClient::connect;
+
+        // connect to a domain_name:port, which may resolve to multiple IP addresses
+        virtual ISocketStream* connect(std::string_view domain_name, uint16_t port, const EndPoint* local = nullptr) = 0;
+
+        // grouped by `key` --- connections are considered equal iff with the same key
+        virtual ISocketStream* connect(std::string_view key, const EndPoint& remote, const EndPoint* local = nullptr) = 0;
+        virtual ISocketStream* connect(std::string_view key, std::string_view domain_name, uint16_t port, const EndPoint* local = nullptr) = 0;
+
+        // allow user-defined connector, which will be used to establish new connections
+        virtual ISocketStream* connect(std::string_view key, TempDelegate<ISocketStream*> connector) = 0;
+    };
+
     class ISocketServer : public ISocketBase, public ISocketName, public Object {
     public:
         virtual int bind(const EndPoint& ep) = 0;
@@ -296,8 +316,42 @@ namespace net {
     extern "C" ISocketServer* new_tcp_socket_server();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
-    extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration = -1UL,
-                                                  bool client_ownership = false);
+
+    struct SocketPoolArgs {
+        // if not provided, user-defined connector must
+        // be used to establish new connections
+        ISocketClient* sockclient = nullptr;
+        bool client_ownership = false;
+
+        bool enable_tcp_keepalive = false;
+        // idle seconds before the first keepalive probe (TCP_KEEPIDLE)
+        uint16_t tcp_keepalive_time = 2;
+        // seconds between keepalive probes (TCP_KEEPINTVL)
+        uint16_t tcp_keepalive_intvl = 2;
+        // max # of TCP keep-alive probes before killing the connection
+        uint16_t tcp_keepalive_probes = 15;
+
+        // if heartbeater is provided, it is called with each in-stock socket
+        // stream every `heartbeat_interval` us to send heartbeats, and
+        // return value of 0 for success, -1 for failure
+        Callback<ISocketStream*> heartbeater = { };
+        uint64_t heartbeat_interval = 10'000'000;
+
+        // in-stock socket streams are deleted after `expiration` us
+        uint64_t expiration = -1ULL;
+    };
+
+    extern "C" ISocketPool* new_tcp_socket_pool(const SocketPoolArgs& args);
+
+    // `client` can be nullptr, in this case user-defined connector must be used to establish new connections
+    inline ISocketPool* new_tcp_socket_pool(ISocketClient* sockclient,
+            uint64_t expiration = -1ULL, bool client_ownership = false) {
+        return new_tcp_socket_pool({
+            .sockclient = sockclient,
+            .client_ownership = client_ownership,
+            .expiration = expiration,
+        });
+    }
 
     extern "C" ISocketClient* new_zerocopy_tcp_client();
     extern "C" ISocketServer* new_zerocopy_tcp_server();

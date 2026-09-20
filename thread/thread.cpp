@@ -35,13 +35,6 @@ limitations under the License.
 #ifdef _WIN64
 #include <processthreadsapi.h>
 #include <stdlib.h>
-inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
-    auto ok = malloc(size);
-    if (!ok)
-        return ENOMEM;
-    *memptr = ok;
-    return 0;
-}
 #else
 #include <sys/mman.h>
 #endif
@@ -115,7 +108,7 @@ namespace photon
         ssize_t wait_and_fire_events(uint64_t timeout) override {
             DEFER(notify.store(false, std::memory_order_release));
             if (!timeout) return 0;
-            timeout = min(timeout, 1000 * 100UL);
+            timeout = min(timeout, 1000 * 100ULL);
             std::unique_lock<std::mutex> lock(_mutex);
             if (notify.load(std::memory_order_acquire)) {
                 return 0;
@@ -1048,7 +1041,7 @@ R"(
         // at least a whole page for mprotect
         least_stack_size += PAGE_SIZE;
         // and make sure it's at least 16K and aligned to page size
-        least_stack_size = align_up(std::max(16UL * 1024, least_stack_size), PAGE_SIZE);
+        least_stack_size = align_up(std::max(size_t(16ULL * 1024), least_stack_size), PAGE_SIZE);
         stack_size = align_up(stack_size, PAGE_SIZE);
         if (unlikely(stack_size < least_stack_size)) {
             LOG_WARN(VALUE(stack_size), " is less than minimal value `, use the minimal value instead", least_stack_size);
@@ -1175,7 +1168,7 @@ R"(
 #else
         clock_gettime(CLOCK_MONOTONIC, &tv);
 #endif
-        auto _now = tv.tv_sec * 1000ul * 1000ul + tv.tv_nsec / 1000ul;
+        auto _now = tv.tv_sec * 1000ull * 1000ull + tv.tv_nsec / 1000ull;
         now = _now;     // can not ```return now = ...;``` in debug
         return _now;    // mode because ```now``` is a volatile variable
     }
@@ -1618,7 +1611,6 @@ insert_list:
             if (!timeout)
                 timeout = _default_timeout;
         } while(_repeating);
-        _th = nullptr;
     }
     void* Timer::_stub(void* _this)
     {
@@ -2004,6 +1996,12 @@ insert_list:
             if ((possibly_running && th->state == states::RUNNING) ||
                                     !th->allow_work_stealing()) {
                 th = th->next();
+            } else if (th->idx != -1) {
+                // sleeping threads interrupted by another vCPU are inserted to  
+                // standby q without poping from sleeping q, they can not be stolen.
+                th = th->next();
+                // note that migrated threads are also inserted to standby q, but
+                // they are not in a sleeping q, so they are able to be stolen.
             } else {
                 auto next = th->remove_from_list();
                 stolen.push_back(th); count++;
@@ -2076,7 +2074,7 @@ insert_list:
                 thread_yield();
                 if (vcpu->state == states::DONE)
                     break;
-                if (unlikely(sat_sub(now, last_idle) >= 1000UL)) {
+                if (unlikely(sat_sub(now, last_idle) >= 1000ULL)) {
                     vcpu->master_event_engine->wait_and_fire_events(0);
                     last_idle = now;
                 }
@@ -2105,7 +2103,7 @@ insert_list:
         while (!AtomicRunQ(rq).size_1or2() || !sleepq.empty() || !standbyq.empty()) {
             if (!sleepq.empty()) {
                 // sleep till all sleeping threads ends
-                thread_usleep(1000UL);
+                thread_usleep(1000ULL);
             } else {
                 thread_yield();
             }
@@ -2153,7 +2151,13 @@ insert_list:
     }
     static int do_thread_migrate(thread* th, vcpu_base* vb) {
         assert(vb != th->vcpu);
-        AtomicRunQ().remove_from_list(th);
+        AtomicRunQ arq;
+        SCOPED_LOCK(th->lock);
+        if (th->state != READY || th->vcpu != CURRENT->vcpu) {
+            LOG_ERROR_RETURN(EINVAL, -1,
+                "thread ` state changed during migrate", th)
+        }
+        arq.remove_from_list(th);
         th->get_vcpu()->nthreads--;
         th->state = STANDBY;
         auto vcpu = (vcpu_t*)vb;
