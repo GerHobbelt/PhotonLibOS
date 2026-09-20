@@ -87,8 +87,8 @@ public:
         bool _ownership;
     public:
         Extraction(std::string_view sv, bool strict = false) {
-            //for regular strings, sv[sv.size()] should be accessible
-            if (!strict && sv[sv.size()] == '\0') {
+            //for regular strings, sv.data()[sv.size()] should be accessible
+            if (!strict && sv.data()[sv.size()] == '\0') {
                 _s.reset((char*)sv.data());
                 _ownership = false;
             } else if (sv.size() < N) {
@@ -239,6 +239,7 @@ public:
         estring_view find_part(const char* begin) const
         {
             auto end = &*str.end();
+            if (begin >= end) return {};
             auto& separator = get_sep_ref(sep);
 
             if (consecutive_merge)
