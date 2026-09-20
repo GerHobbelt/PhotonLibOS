@@ -2,14 +2,16 @@ name: Linux x86_64
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, unlabeled]
     branches: [ "main", "release/*" ]
 
 jobs:
   gcc850:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+      options: --cpus 4 --privileged --shm-size 512m
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -17,6 +19,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
@@ -47,10 +56,11 @@ jobs:
           pkill redis-server
 
   gcc921:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+      options: --cpus 4 --privileged --shm-size 512m
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -58,6 +68,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
@@ -89,10 +106,11 @@ jobs:
           pkill redis-server
 
   gcc1031:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+      options: --cpus 4 --privileged --shm-size 512m
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -100,6 +118,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-10/enable
@@ -131,10 +156,11 @@ jobs:
           pkill redis-server
 
   gcc1121:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+      options: --cpus 4 --privileged --shm-size 512m
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -142,6 +168,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-11/enable
@@ -173,10 +206,11 @@ jobs:
           pkill redis-server
 
   gcc1211:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+      options: --cpus 4 --privileged --shm-size 512m
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -184,6 +218,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-12/enable
@@ -215,6 +256,7 @@ jobs:
           pkill redis-server
 
   gcc13:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -226,6 +268,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-13/enable
@@ -257,6 +306,7 @@ jobs:
           pkill redis-server
 
   gcc14:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -268,6 +318,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-14/enable
@@ -299,6 +356,7 @@ jobs:
           pkill redis-server
 
   fstack:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-fstack:latest
@@ -313,6 +371,7 @@ jobs:
           cmake --build build -j $(nproc) -t fstack-dpdk-demo
 
   RocksDB:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: almalinux:8

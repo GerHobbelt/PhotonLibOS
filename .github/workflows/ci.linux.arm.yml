@@ -2,15 +2,17 @@ name: Linux ARM
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, unlabeled]
     branches: [ "main", "release/*" ]
 
 jobs:
   arm-linux-build-and-test:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-24.04-arm
 
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+      options: --cpus 4 --shm-size 512m --privileged
 
     steps:
       - uses: szenius/set-timezone@v2.0
@@ -117,6 +119,7 @@ jobs:
           pkill redis-server
 
   debug-build-from-source:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-24.04-arm
     container:
       image: almalinux:8

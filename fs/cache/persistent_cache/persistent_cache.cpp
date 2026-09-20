@@ -123,7 +123,7 @@ public:
         return new PersistentCacheFile(src_file, pathname, this);
     }
     IFile *open(const char *pathname, int flags, mode_t mode) {
-        return open(pathname, flags, 0644);
+        return open(pathname, flags);
     }
 
     UNIMPLEMENTED(int stat(const char *pathname, struct stat *buf) override);
@@ -323,8 +323,7 @@ std::pair<off_t, size_t> PersistentCacheStore::query_refill_range(off_t offset, 
 
     for (auto i = fie.fm_mapped_extents - 1; i < fie.fm_mapped_extents; i--) {
         auto &extent = fie.fm_extents[i];
-        if ((extent.fe_flags == FIEMAP_EXTENT_UNKNOWN) ||
-            (extent.fe_flags == FIEMAP_EXTENT_UNWRITTEN))
+        if (extent.fe_flags & (FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_UNWRITTEN))
             continue;
         if (extent.fe_logical < hole_end) {
             if (extent.fe_logical_end() >= hole_end) {
@@ -336,8 +335,7 @@ std::pair<off_t, size_t> PersistentCacheStore::query_refill_range(off_t offset, 
 
     for (uint32_t i = 0; i < fie.fm_mapped_extents; i++) {
         auto &extent = fie.fm_extents[i];
-        if ((extent.fe_flags == FIEMAP_EXTENT_UNKNOWN) ||
-            (extent.fe_flags == FIEMAP_EXTENT_UNWRITTEN))
+        if (extent.fe_flags & (FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_UNWRITTEN))
             continue;
         if (extent.fe_logical_end() > hole_start) {
             if (extent.fe_logical <= hole_start) {

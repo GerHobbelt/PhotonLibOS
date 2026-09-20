@@ -28,6 +28,7 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
 #include <photon/common/utility.h>
+#include <photon/fs/fiemap.h>
 #include <photon/fs/path.h>
 
 namespace photon {
@@ -70,8 +71,45 @@ FileCachePool::~FileCachePool() {
 }
 
 void FileCachePool::Init() {
+  probeFiemap();
   traverseDir("/");
   timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8UL * 1024 * 1024);
+}
+
+void FileCachePool::probeFiemap() {
+  static const char* probePath = "/.photon_fiemap_probe";
+  struct stat st = {};
+  bool preExists = (mediaFs_->stat(probePath, &st) == 0);
+  auto probe = mediaFs_->open(probePath, O_CREAT | O_RDWR, 0600);
+  if (!probe) {
+    LOG_ERRNO_RETURN(0, void(), "fiemap probe file open failed");
+  }
+  DEFER({
+    delete probe;
+    if (!preExists) mediaFs_->unlink(probePath);
+  });
+
+  char buf[4096] = {};
+  if (probe->pwrite(buf, sizeof(buf), 0) != (ssize_t)sizeof(buf)) {
+    LOG_INFO("fiemap probe write failed, errno `", ERRNO());
+    return;
+  }
+
+  fiemap_t<1> fie(0, sizeof(buf));
+  fie.fm_mapped_extents = 0;
+  if (probe->fiemap(&fie) != 0 || fie.fm_mapped_extents == 0) {
+    LOG_INFO("fiemap not supported on this filesystem, errno `", ERRNO());
+    return;
+  }
+
+  // Overlayfs returns extents with FIEMAP_EXTENT_UNKNOWN, which are skipped
+  // by queryRefillRange. Detect and fall back to in-memory range tracking.
+  if (fie.fm_extents[0].fe_flags & FIEMAP_EXTENT_UNKNOWN) {
+    LOG_INFO("fiemap returns UNKNOWN extents, falling back to range tracking");
+    return;
+  }
+
+  fiemapSupported_ = true;
 }
 
 ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t mode) {
@@ -153,7 +191,7 @@ int FileCachePool::evict(std::string_view filename) {
     auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
     DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
-    err = mediaFs_->truncate(filePath.data(), 0);
+    err = cacheStore->evict(0);
     lruEntry->truncate_done = false;
   }
   if (err) {
@@ -296,7 +334,7 @@ void FileCachePool::eviction() {
       auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
       DEFER(cacheStore->release());
       photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
-      err = mediaFs_->truncate(fileName.data(), 0);
+      err = cacheStore->evict(0);
       lruEntry->truncate_done = false;
     }
 
