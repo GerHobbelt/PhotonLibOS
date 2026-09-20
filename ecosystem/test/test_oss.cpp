@@ -25,6 +25,7 @@ DEFINE_string(sk, "", "OSS Access Key Secret");
 DEFINE_string(endpoint, "", "OSS Endpoint");
 DEFINE_string(bucket, "", "OSS Bucket Name");
 DEFINE_string(region, "", "OSS Region");
+DEFINE_bool(path_style, false, "Use path-style requests");
 
 using namespace photon::objstore;
 
@@ -47,6 +48,7 @@ class BasicAuthOssTest : public ::testing::Test {
     opts_.bucket = FLAGS_bucket;
     opts_.endpoint = FLAGS_endpoint;
     opts_.max_list_ret_cnt = 2;
+    opts_.path_style = FLAGS_path_style;
 
     // v4 signature with non-empty region, otherwise v1 signature.
     opts_.region = FLAGS_region;
@@ -97,6 +99,7 @@ class BasicAuthOssTest : public ::testing::Test {
 
   void list_objects();
   void put_and_get_meta();
+  void bucket_operations();
   void copy_and_rename();
   void append_and_get();
   void multipart();
@@ -152,6 +155,54 @@ class CustomCachedAuthOssTest : public CachedAuthOssTest {
     ASSERT_NE(client, nullptr) << "Failed to create OSS client";
   }
 };
+
+void BasicAuthOssTest::bucket_operations() {
+  auto suffix =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  estring bucket_name;
+  bucket_name.appends("photon-test-", suffix);
+
+  ClientOptions opts;
+  opts.bucket = bucket_name;
+  opts.endpoint = FLAGS_endpoint;
+  opts.region = FLAGS_region;
+  opts.path_style = FLAGS_path_style;
+  auto auth = new_basic_oss_authenticator({FLAGS_ak, FLAGS_sk, ""});
+  Client* bclient = new_oss_client(opts, auth);
+  ASSERT_NE(bclient, nullptr);
+  DEFER(delete bclient);
+  // best-effort cleanup in case an assertion fails mid-test
+  DEFER({
+    bclient->delete_object("bucket_operations/testfile");
+    bclient->delete_bucket();
+  });
+
+  int ret = bclient->put_bucket();
+  ASSERT_EQ(ret, 0);
+
+  // the new bucket is usable right away
+  char buf[3] = {1};
+  iovec iov{buf, 3};
+  auto crc64 = crc64ecma(buf, 3, 0);
+  ret = bclient->put_object("bucket_operations/testfile", &iov, 1, &crc64);
+  ASSERT_EQ(ret, 3);
+
+  // deleting a non-empty bucket must fail
+  ret = bclient->delete_bucket();
+  ASSERT_EQ(ret, -1);
+
+  ret = bclient->delete_object("bucket_operations/testfile");
+  ASSERT_EQ(ret, 0);
+
+  ret = bclient->delete_bucket();
+  ASSERT_EQ(ret, 0);
+
+  // the bucket is gone now
+  ret = bclient->put_object("bucket_operations/testfile", &iov, 1);
+  ASSERT_EQ(ret, -1);
+}
 
 void BasicAuthOssTest::list_objects() {
   std::vector<std::string> test_objects = {
@@ -345,6 +396,15 @@ void BasicAuthOssTest::copy_and_rename() {
   ASSERT_EQ(ret, 0);
   ret = client->copy_object(src, dst, false, true);
   ASSERT_EQ(ret, -1);  // overwrite is not allowed
+
+  auto dst2 = get_real_test_path("copy_and_rename_object/dst2.mp4");
+  ObjectCopyOptions copy_opts;
+  copy_opts.overwrite = true;
+  copy_opts.set_mime = true;
+  ret = client->copy_object(dst, dst2, copy_opts);
+  ASSERT_EQ(ret, 0);
+  EXPECT_TRUE(copy_opts.crc64.has_value());
+
   ret = client->rename_object(src, dst);
   ASSERT_EQ(ret, 0);
 }
@@ -397,8 +457,10 @@ void BasicAuthOssTest::multipart() {
     ASSERT_TRUE(false);
   }
   for (int i = 0; i < 5; i++) {
-    ret = ctx.copy(i * buf_size, buf_size, i + 1, path);
+    ObjectPartCopyOptions pc_opts;
+    ret = ctx.copy(i * buf_size, buf_size, i + 1, path, pc_opts);
     ASSERT_EQ(ret, 0);
+    EXPECT_TRUE(pc_opts.crc64.has_value());
   }
   ret = ctx.complete(nullptr);
   ASSERT_EQ(ret, 0);
@@ -898,6 +960,7 @@ void BasicAuthOssTest::buf_multipart() {
 }
 
 TEST_F(BasicAuthOssTest, list_objects) { list_objects(); }
+TEST_F(BasicAuthOssTest, bucket_operations) { bucket_operations(); }
 TEST_F(BasicAuthOssTest, multipart) { multipart(); }
 TEST_F(BasicAuthOssTest, append_and_get) { append_and_get(); }
 TEST_F(BasicAuthOssTest, put_and_get_meta) { put_and_get_meta(); }

@@ -113,30 +113,34 @@ std::string_view lookup_mime_type(std::string_view name) {
 class OssUrl {
  public:
   estring m_url, m_raw_object;
-  uint64_t m_url_size;
   rstring_view16 m_bucket, m_object;
   OssUrl() = default;
   OssUrl(std::string_view endpoint, std::string_view bucket,
-         std::string_view object, bool is_http) {
+         std::string_view object, bool is_http, bool path_style) {
     assert(!bucket.empty());
-    init(endpoint, bucket, object, is_http);
+    init(endpoint, bucket, object, is_http, path_style);
   }
   void init(std::string_view endpoint, std::string_view bucket,
-            std::string_view object, bool is_http) {
+            std::string_view object, bool is_http, bool path_style) {
     bool has_slash = (object.size() > 0 && object[0] == '/');
     if (has_slash) object = object.substr(1);
 
     auto escaped_obj = photon::net::http::url_escape(object);
-    m_url.appends(photon::net::http::http_or_s(is_http), bucket, ".", endpoint,
-                  "/", escaped_obj);
+    auto scheme = photon::net::http::http_or_s(is_http);
+    if (path_style) {
+      m_url.appends(scheme, endpoint, "/", bucket, "/", escaped_obj);
+      m_bucket = {scheme.size() + endpoint.size() + 1, bucket.size()};
+      m_object = {m_bucket.offset() + bucket.size() + 1,
+                  escaped_obj.size()};  // start without prefix /
+    } else {
+      m_url.appends(scheme, bucket, ".", endpoint, "/", escaped_obj);
+      m_bucket = {scheme.size(), bucket.size()};
+      m_object = {m_bucket.offset() + bucket.size() + endpoint.size() + 1 + 1,
+                  escaped_obj.size()};  // start without prefix /
+    }
 
     auto escaped = escaped_obj.size() > object.size();
     if (escaped) m_raw_object = object;
-
-    m_url_size = m_url.size();
-    m_bucket = {(is_http ? 7ull : 8ull), bucket.size()};
-    m_object = {m_bucket.offset() + bucket.size() + endpoint.size() + 1 + 1,
-                escaped_obj.size()};  // start without prefix /
   }
   estring_view bucket() const { return m_url | m_bucket; }
   estring_view object(bool url_escaped = false) const {
@@ -309,6 +313,12 @@ static int verify_crc64_if_needed(HTTP_STACK_OP& op, std::string_view object,
   return 0;
 }
 
+static bool get_resp_crc64(HTTP_STACK_OP& op, uint64_t* crc64) {
+  auto it = op.resp.headers.find("x-oss-hash-crc64ecma");
+  if (it == op.resp.headers.end()) return false;
+  return estring_view(it.second()).to_uint64_check(crc64);
+}
+
 static ssize_t body_writer_cb(void* iov_view, photon::net::http::Request* req) {
   auto view = static_cast<iovector_view*>(iov_view);
   auto ret = req->writev(view->iov, view->iovcnt);
@@ -335,6 +345,10 @@ class OssClientImpl : public Client {
   OssClientImpl(const ClientOptions& options, Authenticator* authenticator);
   ~OssClientImpl();
 
+  int put_bucket(std::string_view agent_bucket);
+
+  int delete_bucket();
+
   int list_objects(std::string_view prefix, ListObjectsCallback cb,
                    ListObjectsParameters = {}, std::string* marker = nullptr);
 
@@ -358,7 +372,7 @@ class OssClientImpl : public Client {
                         ObjectUploadOptions& opts);
 
   int copy_object(std::string_view src_object, std::string_view dst_object,
-                  bool overwrite = false, bool set_mime = false);
+                  ObjectCopyOptions& opts);
 
   int init_multipart_upload(std::string_view object, void** context);
 
@@ -367,7 +381,8 @@ class OssClientImpl : public Client {
                       ObjectUploadOptions& opts);
 
   int upload_part_copy(void* context, off_t offset, size_t count,
-                       int part_number, std::string_view from = {});
+                       int part_number, std::string_view from,
+                       ObjectPartCopyOptions& opts);
 
   int complete_multipart_upload(void* context, ObjectUploadOptions& opts);
 
@@ -390,6 +405,12 @@ class OssClientImpl : public Client {
   void set_credentials(CredentialParameters&& credentials);
 
  private:
+  OssUrl make_oss_url(std::string_view object) {
+    return make_oss_url(object, m_bucket);
+  }
+  OssUrl make_oss_url(std::string_view object, std::string_view bucket) {
+    return {m_endpoint, bucket, object, m_is_http, m_oss_options.path_style};
+  }
   int append_auth_headers(photon::net::http::Verb v, const OssUrl& oss_url,
                           photon::net::http::Headers& headers,
                           const StringKV& query_params = {},
@@ -407,8 +428,8 @@ class OssClientImpl : public Client {
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
                          std::string* marker);
 
-  int do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url, bool overwrite,
-                     bool set_mime);
+  int do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
+                     ObjectCopyOptions& opts);
   int do_delete_object(OssUrl& oss_url);
 
   int do_delete_objects(estring_view bucket, estring_view prefix,
@@ -424,6 +445,37 @@ class OssClientImpl : public Client {
 };
 
 #define OssClient OssClientImpl
+
+// Resolve filters enforcing ClientOptions::ip_version. The leading void* is
+// the Delegate object slot, bound to nullptr.
+static bool oss_resolve_filter_ipv4(void*, photon::net::IPAddr addr) {
+  return addr.is_ipv4();
+}
+static bool oss_resolve_filter_ipv6(void*, photon::net::IPAddr addr) {
+  return addr.is_ipv6();
+}
+
+// Resolver decorator enforcing a single address family: wraps a private
+// DefaultResolver, keeping only addresses that pass `filter`. Each OSS client
+// owns one, so its DNS cache is private and the filter is never bypassed.
+class FilteredResolver : public photon::net::Resolver {
+ public:
+  std::unique_ptr<photon::net::Resolver> inner{photon::net::new_default_resolver()};
+  Delegate<bool, photon::net::IPAddr> filter;
+
+  explicit FilteredResolver(Delegate<bool, photon::net::IPAddr> filter) : filter(filter) {}
+
+  photon::net::IPAddr resolve(std::string_view host) override {
+    return inner->resolve_filter(host, filter);
+  }
+  // The HTTP client only calls resolve(); enforce the same filter here.
+  photon::net::IPAddr resolve_filter(std::string_view host, Delegate<bool, photon::net::IPAddr>) override {
+    return inner->resolve_filter(host, filter);
+  }
+  void discard_cache(std::string_view host, photon::net::IPAddr ip) override {
+    inner->discard_cache(host, ip);
+  }
+};
 
 OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
     : m_bucket(options.bucket),
@@ -444,6 +496,22 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
   m_client->timeout(m_oss_options.request_timeout_us);
   m_client->set_user_agent(m_oss_options.user_agent);
   if (!m_oss_options.proxy.empty()) m_client->set_proxy(m_oss_options.proxy);
+
+  // For a single-family ip_version, give the client a private resolver that only
+  // accepts matching addresses, so the filter is never bypassed by a shared cache.
+  switch (m_oss_options.ip_version) {
+    case IPVersion::kIPv4Only:
+    case IPVersion::kIPv6Only: {
+      auto filter = m_oss_options.ip_version == IPVersion::kIPv4Only
+                        ? Delegate<bool, photon::net::IPAddr>{nullptr, &oss_resolve_filter_ipv4}
+                        : Delegate<bool, photon::net::IPAddr>{nullptr, &oss_resolve_filter_ipv6};
+      m_client->set_resolver(new FilteredResolver(filter), true);
+      break;
+    }
+    case IPVersion::kBoth:
+    default:
+      break;
+  }
 
   auto& ch = m_oss_options.custom_headers;
   for (auto it = ch.begin(); it != ch.end();) {
@@ -576,7 +644,7 @@ int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view pref
     query_params.insert({OSS_PARAM_KEY_CONTINUATION_TOKEN, escaped_marker});
   if (!start_after.empty())
     query_params.insert({OSS_PARAM_KEY_START_AFTER, escaped_start_after});
-  OssUrl oss_url(m_endpoint, bucket, {}, m_is_http);
+  auto oss_url = make_oss_url({}, bucket);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
   int r = sign_and_call(op, Verb::GET, oss_url, query_params);
   if (r < 0) return r;
@@ -618,7 +686,7 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
   if (!_mark.empty())
     query_params.insert({OSS_PARAM_KEY_MARKER, escaped_marker});
 
-  OssUrl oss_url(m_endpoint, bucket, {}, m_is_http);
+  auto oss_url = make_oss_url({}, bucket);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
   int r = sign_and_call(op, Verb::GET, oss_url, query_params);
   if (r < 0) return r;
@@ -637,18 +705,18 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
 }
 
 int OssClient::do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
-                              bool overwrite, bool set_mime) {
+                              ObjectCopyOptions& opts) {
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, dst_oss_url.url());
 
   estring oss_copy_source =
       estring("/").appends(src_oss_url.bucket(), "/", src_oss_url.object(true));
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source);
-  if (!overwrite) {
+  if (!opts.overwrite) {
     op.req.headers.insert(OSS_HEADER_KEY_X_OSS_FORBID_OVERWRITE, "true");
   }
 
   std::string_view dst_type{};  // use the same content type as the source
-  if (set_mime) {
+  if (opts.set_mime) {
     auto src_type = lookup_mime_type(src_oss_url.object());
     auto new_dst_type = lookup_mime_type(dst_oss_url.object());
     if (src_type != new_dst_type) dst_type = new_dst_type;
@@ -658,7 +726,13 @@ int OssClient::do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
     }
   }
 
-  return sign_and_call(op, Verb::PUT, dst_oss_url);
+  opts.crc64.reset();
+  int r = sign_and_call(op, Verb::PUT, dst_oss_url);
+  if (r < 0) return r;
+
+  uint64_t crc64;
+  if (get_resp_crc64(op, &crc64)) opts.crc64.set(crc64);
+  return 0;
 }
 
 int OssClient::do_delete_object(OssUrl& oss_url) {
@@ -710,7 +784,7 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
                          {(void*)req_list.data(), req_list.size()},
                          {(void*)req_tail.data(), req_tail.size()}};
   iovector_view body_view(iov, 3);
-  OssUrl oss_url(m_endpoint, bucket, "/", m_is_http);
+  auto oss_url = make_oss_url("/", bucket);
   auto md5 = md5_base64(body_view);
 
   DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
@@ -756,10 +830,13 @@ retry:
 
 int OssClient::rename_object(std::string_view src_path,
                              std::string_view dst_path, bool set_mime) {
-  OssUrl src_oss_url(m_endpoint, m_bucket, src_path, m_is_http);
-  OssUrl dst_oss_url(m_endpoint, m_bucket, dst_path, m_is_http);
+  auto src_oss_url = make_oss_url(src_path);
+  auto dst_oss_url = make_oss_url(dst_path);
 
-  if (do_copy_object(src_oss_url, dst_oss_url, true, set_mime) < 0) return -1;
+  ObjectCopyOptions opts;
+  opts.overwrite = true;
+  opts.set_mime = set_mime;
+  if (do_copy_object(src_oss_url, dst_oss_url, opts) < 0) return -1;
   return do_delete_object(src_oss_url);
 }
 
@@ -768,7 +845,7 @@ int OssClient::put_symlink(std::string_view obj, std::string_view target) {
                                         {
                                             {OSS_PARAM_KEY_SYMLINK, ""},
                                         });
-  OssUrl oss_url(m_endpoint, m_bucket, obj, m_is_http);
+  auto oss_url = make_oss_url(obj);
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
   auto escaped_tgt = photon::net::http::url_escape(target);
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET, escaped_tgt);
@@ -780,13 +857,27 @@ int OssClient::get_symlink(std::string_view obj, std::string& target) {
                                         {
                                             {OSS_PARAM_KEY_SYMLINK, ""},
                                         });
-  OssUrl oss_url(m_endpoint, m_bucket, obj, m_is_http);
+  auto oss_url = make_oss_url(obj);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
   int r = sign_and_call(op, Verb::GET, oss_url, query_params);
   if (r < 0) return r;
   target = photon::net::http::url_unescape(
       op.resp.headers[OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET]);
   return r;
+}
+
+int OssClient::put_bucket(std::string_view agent_bucket) {
+  auto oss_url = make_oss_url({});
+  DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.url());
+  if (!agent_bucket.empty())
+    op.req.headers.insert(OSS_HEADER_KEY_X_OSS_AGENTIC_BUCKET, agent_bucket);
+  return sign_and_call(op, Verb::PUT, oss_url);
+}
+
+int OssClient::delete_bucket() {
+  auto oss_url = make_oss_url({});
+  DEFINE_ONSTACK_OP(m_client, Verb::DELETE, oss_url.url());
+  return sign_and_call(op, Verb::DELETE, oss_url);
 }
 
 int OssClient::delete_objects(const std::vector<std::string_view>& objects,
@@ -825,7 +916,7 @@ int OssClient::list_objects(std::string_view prefix, ListObjectsCallback cb,
 }
 
 int OssClient::head_object(std::string_view object, ObjectHeaderMeta& meta) {
-  OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
+  auto oss_url = make_oss_url(object);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.url());
   int r = sign_and_call(op, Verb::HEAD, oss_url);
   if (r < 0) return r;
@@ -897,7 +988,7 @@ ssize_t OssClient::get_object_range(std::string_view obj_path, off_t offset,
 
   bool invalidate_cache = false;
 retry:
-  OssUrl oss_url(m_endpoint, m_bucket, obj_path, m_is_http);
+  auto oss_url = make_oss_url(obj_path);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.url());
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
   op.req.headers.range(offset, offset + cnt - 1);
@@ -1132,7 +1223,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
                          {(void*)req_tail.data(), req_tail.size()}};
   iovector_view body_view(iov, 3);
 
-  OssUrl oss_url(m_endpoint, m_bucket, "/", m_is_http);
+  auto oss_url = make_oss_url("/");
   auto md5 = md5_base64(body_view);
 
   DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
@@ -1221,6 +1312,14 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
       read_good_cnt++;
     } else {
       auto result = frame.read_end(stream);
+      // The End frame is the last one; skip the trailing bytes of the
+      // chunked body (terminating chunk 0\r\n\r\n) if necessary, so that
+      // close() sees a finished body and the keep-alive connection can
+      // be pooled for reuse instead of being dropped.
+      // TODO: remove this workaround once ChunkedBodyReadStream consumes
+      // the terminating chunk automatically on exact-sized reads.
+      char drain_buf[64];
+      op.resp.read(drain_buf, sizeof(drain_buf));
       LOG_DEBUG("End frame status code ` request cnt ` success cnt `",
                 result.status_code, result.request_count, result.success_count);
       if (read_good_cnt != result.success_count) {
@@ -1236,7 +1335,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
 
 ssize_t OssClient::put_object(std::string_view object, size_t cnt,
                               BodyWriter writer, ObjectUploadOptions& opts) {
-  OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
+  auto oss_url = make_oss_url(object);
   auto content_type = lookup_mime_type(object);
 
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.url());
@@ -1266,7 +1365,7 @@ ssize_t OssClient::append_object(std::string_view object,
   iovector_view view((struct iovec*)iov, iovcnt);
   auto cnt = view.sum();
 
-  OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
+  auto oss_url = make_oss_url(object);
 
   estring position_str = std::to_string(position);
 
@@ -1291,12 +1390,12 @@ ssize_t OssClient::append_object(std::string_view object,
 }
 
 int OssClient::copy_object(std::string_view src_object,
-                           std::string_view dst_object, bool overwrite,
-                           bool set_mime) {
-  OssUrl src_oss_url(m_endpoint, m_bucket, src_object, m_is_http);
-  OssUrl dst_oss_url(m_endpoint, m_bucket, dst_object, m_is_http);
+                           std::string_view dst_object,
+                           ObjectCopyOptions& opts) {
+  auto src_oss_url = make_oss_url(src_object);
+  auto dst_oss_url = make_oss_url(dst_object);
 
-  return do_copy_object(src_oss_url, dst_oss_url, overwrite, set_mime);
+  return do_copy_object(src_oss_url, dst_oss_url, opts);
 }
 
 struct oss_multipart_context {
@@ -1307,7 +1406,7 @@ struct oss_multipart_context {
 };
 
 int OssClient::init_multipart_upload(std::string_view object, void** context) {
-  OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
+  auto oss_url = make_oss_url(object);
 
   DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
                                         {// must appear in dictionary order!
@@ -1351,7 +1450,7 @@ ssize_t OssClient::upload_part(void* context, size_t cnt,
                            {{OSS_PARAM_KEY_PART_NUMBER, part_nums_str},
                             {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}});
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
+  auto oss_url = make_oss_url(ctx->obj_path);
 
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
 
@@ -1380,12 +1479,13 @@ ssize_t OssClient::upload_part(void* context, size_t cnt,
 }
 
 int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
-                                int part_number, std::string_view from) {
+                                int part_number, std::string_view from,
+                                ObjectPartCopyOptions& opts) {
   assert(context);
   oss_multipart_context* ctx = (oss_multipart_context*)context;
   assert(!ctx->upload_id.empty());
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
+  auto oss_url = make_oss_url(ctx->obj_path);
 
   estring part_num_str = std::to_string(part_number);
 
@@ -1407,8 +1507,12 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source);
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE, range);
+  opts.crc64.reset();
   int r = sign_and_call(op, Verb::PUT, oss_url, query_params);
   if (r < 0) return r;
+
+  uint64_t crc64;
+  if (get_resp_crc64(op, &crc64)) opts.crc64.set(crc64);
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(EINVAL, -1, "failed to parse xml resp_body");
@@ -1452,7 +1556,7 @@ int OssClient::complete_multipart_upload(void* context,
   struct iovec iov{(void*)(req_body.data()), req_body.size()};
 
   iovector_view view(&iov, 1);
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
+  auto oss_url = make_oss_url(ctx->obj_path);
 
   DEFER(delete ctx);
 
@@ -1476,7 +1580,7 @@ int OssClient::abort_multipart_upload(void* context) {
   oss_multipart_context* ctx = (oss_multipart_context*)context;
   assert(!ctx->upload_id.empty());
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
+  auto oss_url = make_oss_url(ctx->obj_path);
 
   DEFER(delete ctx);
 
@@ -1495,7 +1599,7 @@ int OssClient::get_object_meta(std::string_view object, ObjectMeta& meta) {
                                             // must appear in dictionary order!
                                             {OSS_PARAM_KEY_OBJECT_META, ""},
                                         });
-  OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
+  auto oss_url = make_oss_url(object);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.append_params(query_params));
   int r = sign_and_call(op, Verb::HEAD, oss_url, query_params);
   if (r < 0) return r;
@@ -1503,7 +1607,7 @@ int OssClient::get_object_meta(std::string_view object, ObjectMeta& meta) {
 }
 
 int OssClient::delete_object(std::string_view obj_path) {
-  OssUrl oss_url(m_endpoint, m_bucket, obj_path, m_is_http);
+  auto oss_url = make_oss_url(obj_path);
   return do_delete_object(oss_url);
 }
 

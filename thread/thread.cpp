@@ -69,13 +69,18 @@ limitations under the License.
 // Define assembly section header for clang and gcc
 #if defined(__APPLE__)
 #define DEF_ASM_FUNC(name) ".text\n" \
+                           ".globl "#name"\n" \
+                           ".private_extern "#name"\n" \
                            #name": "
 #elif defined(_WIN64)
 #define DEF_ASM_FUNC(name) ".text\n .p2align 4\n" \
-                           ".def "#name"; .scl 3; .type 32; .endef\n" \
+                           ".globl "#name"\n" \
+                           ".def "#name"; .scl 2; .type 32; .endef\n" \
                            #name": "
 #else
 #define DEF_ASM_FUNC(name) ".section .text."#name",\"axG\",@progbits,"#name",comdat\n" \
+                           ".globl "#name"\n" \
+                           ".hidden "#name"\n" \
                            ".type "#name", @function\n" \
                            #name": "
 #endif
@@ -118,10 +123,21 @@ namespace photon
         }
     };
 
+    // The default allocator must work before any dynamic initialization runs:
+    // with static linking the initialization order across translation units is
+    // unspecified, so a photon thread may be created before this TU's
+    // constructors. These two are therefore constant-initialized into .data
+    // (guarded by test-lib-data) and stay the hot path.
     static Delegate<void*, size_t> photon_thread_alloc(
         &default_photon_thread_stack_alloc, nullptr);
     static Delegate<void, void*, size_t> photon_thread_dealloc(
         &default_photon_thread_stack_dealloc, nullptr);
+
+    // The installed allocator as a whole. The two delegates above are only ever
+    // assigned together, extracted from this facade, so a stack can never be
+    // freed by an allocator other than the one that created it. This also
+    // carries the optional trim()/stats() of whichever allocator is installed.
+    static StackAllocator photon_thread_stack_allocator;
 
     struct vcpu_t;
     struct thread;
@@ -215,6 +231,9 @@ namespace photon
         void set_shutting_down(bool flag = true) { set_bit(shift::shutting_down, flag); }
         bool allow_work_stealing() { return is_bit(shift::enable_work_stealing) &&
                                           !(flags & THREAD_PAUSE_WORK_STEALING); }
+        // threads still present in a sleepq (idx != -1) must only be resumed
+        // by their own vCPU, so they can not be stolen
+        bool stealable() { return allow_work_stealing() && idx == -1; }
         int set_error_number() {
             if (likely(error_number)) {
                 errno = error_number;
@@ -329,9 +348,10 @@ namespace photon
 #define ASAN_DIE_SWITCH(to)
 #endif
 
-    static void _asan_start() asm("_asan_start");
+    __attribute__((used, visibility("hidden")))
+    void _asan_start() asm("_asan_start");
 
-    __attribute__((used)) static void _asan_start() { ASAN_START(); }
+    void _asan_start() { ASAN_START(); }
 
     #pragma GCC diagnostic ignored "-Winvalid-offsetof"
     static_assert(offsetof(thread, vcpu) == offsetof(partial_thread, vcpu), "...");
@@ -528,7 +548,7 @@ namespace photon
         uint8_t state = states::RUNNING;
         std::atomic<uint32_t> nthreads{1};
 // offset 48B
-        thread* idle_worker;
+        thread* idle_worker = nullptr;
         // threads scheduled by other vCPUs are added to standbyq by those vCPUs,
         // then moved to runq later by this vCPU at some proper occasion.
         thread_list standbyq;
@@ -577,23 +597,24 @@ namespace photon
             mee = &_default_event_engine;
         }
 
-        static spinlock vcpu_list_lock;    // lock when add, remove, iterate next
-        static rwlock vcpu_list_rwlock;    // rlock when iterate, wlock when remove
+        // a spinlock, because try_work_stealing() iterates the list in the idler
+        // context, where yielding is not allowed (the runq may contain nothing else)
+        static spinlock vcpu_list_lock;    // lock when add, remove, or iterate
         static intrusive_list<vcpu_t, false> pvcpu;
         vcpu_t(uint8_t flags_) {
             flags = flags_;
             master_event_engine = &_default_event_engine;
+        }
+        void go_online() {  // publish after fully initialized
             SCOPED_LOCK(vcpu_list_lock);
             pvcpu.push_back(this);
         }
         void go_offline() { // by removing this from list
-            scoped_rwlock _(vcpu_list_rwlock, WLOCK);
             SCOPED_LOCK(vcpu_list_lock);
             pvcpu.erase(this);
         }
     };
     spinlock vcpu_t::vcpu_list_lock;
-    rwlock vcpu_t::vcpu_list_rwlock;
     intrusive_list<vcpu_t, false> vcpu_t::pvcpu;
 
     class RunQ {
@@ -1008,7 +1029,7 @@ R"(
         __builtin_unreachable();
     }
 
-    extern "C" __attribute__((noreturn))
+    extern "C" __attribute__((noreturn, used, visibility("hidden")))
     void _photon_thread_die(thread* th) asm("_photon_thread_die");
     void _photon_thread_die(thread* th) {
         assert(th == CURRENT);
@@ -1987,17 +2008,25 @@ insert_list:
     inline __attribute__((always_inline))
     thread* ws_scan_q(vcpu_t* v, thread* first, bool possibly_running) {
         // the first must be unstealable
-        assert(!first->allow_work_stealing());
+        assert(!first->stealable());
         thread_list stolen;
         uint64_t count = 0;
         auto th = first->next();
         while(th != first) {
-            SCOPED_LOCK(th->lock);
-            if ((possibly_running && th->state == states::RUNNING) ||
-                                    !th->allow_work_stealing()) {
+            // th->lock must only be try_lock()-ed here: this scan runs with the
+            // victim's runq/standbyq lock held, while everyone else (die(),
+            // thread_interrupt(), ...) takes th->lock BEFORE those locks, so
+            // blocking on th->lock would deadlock (ABBA). busy threads are
+            // simply skipped; the idler will rescan shortly.
+            auto lk = &th->lock;
+            if (lk->try_lock() < 0) {
                 th = th->next();
-            } else if (th->idx != -1) {
-                // sleeping threads interrupted by another vCPU are inserted to  
+                continue;
+            }
+            DEFER(lk->unlock());
+            if ((possibly_running && th->state == states::RUNNING) ||
+                                    !th->stealable()) {
+                // sleeping threads interrupted by another vCPU are inserted to
                 // standby q without poping from sleeping q, they can not be stolen.
                 th = th->next();
                 // note that migrated threads are also inserted to standby q, but
@@ -2020,22 +2049,27 @@ insert_list:
         if (q.empty()) return nullptr;
         SCOPED_LOCK(q.lock);
         if (q.empty()) return nullptr;
-        if (!q.front()->allow_work_stealing())
+        if (!q.front()->stealable())
             return ws_scan_q(v, q.front(), false);
 
         thread_list stolen;
         do {
-            SCOPED_LOCK(q.front()->lock);
-            auto th = q.pop_front();
+            auto th = q.front();
+            auto lk = &th->lock;
+            if (lk->try_lock() < 0)
+                break;  // busy -- leave it for the next scan (see ws_scan_q)
+            DEFER(lk->unlock());
+            q.pop_front();
             stolen.push_back(th);
             th->vcpu->nthreads--;
             th->vcpu = v;
             v->nthreads++;
-        } while (!q.empty() && q.front()->allow_work_stealing());
+        } while (!q.empty() && q.front()->stealable());
         return stolen.eject_whole();
     }
     inline __attribute__((always_inline))
     thread* ws_scan_runq(vcpu_t* v, vcpu_t* u) {
+        // published vcpus always have an idle worker
         if (!u->runq_lock.background_try_lock()) return 0;
         DEFER(u->runq_lock.background_unlock());
         return ws_scan_q(v, u->idle_worker, true);
@@ -2045,20 +2079,18 @@ insert_list:
         assert(CURRENT == vcpu->idle_worker);
         if (0 == (vcpu->flags & VCPU_ENABLE_ACTIVE_WORK_STEALING))
             return false;
-        scoped_rwlock _(vcpu_t::vcpu_list_rwlock, RLOCK);
+        // called by the idler exactly when the runq may contain nothing else
+        // to run, so the whole scan must never yield: use spinlocks only
+        SCOPED_LOCK(vcpu_t::vcpu_list_lock);
         auto u = vcpu->next();
         while (u != vcpu) {
-            if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING)) {
-                SCOPED_LOCK(vcpu_t::vcpu_list_lock);
-                u = u->next();
-                continue;
+            if (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING) {
+                thread* th;
+                if ((th = ws_scan_standbyq(vcpu, u)) || (th = ws_scan_runq(vcpu, u))) {
+                    vcpu->idle_worker->insert_list_tail(th);
+                    return true;
+                }
             }
-            thread* th;
-            if ((th = ws_scan_standbyq(vcpu, u)) || (th = ws_scan_runq(vcpu, u))) {
-                vcpu->idle_worker->insert_list_tail(th);
-                return true;
-            }
-            SCOPED_LOCK(vcpu_t::vcpu_list_lock);
             u = u->next();
         }
         return false;
@@ -2194,6 +2226,13 @@ insert_list:
         }
     }
 
+    inline void vcpu_destroy(thread* th, thread** pc, vcpu_t* vcpu) {
+        delete th;
+        *pc = nullptr;
+        vcpu->~vcpu_t();
+        free(vcpu);
+    }
+
     int vcpu_init(uint64_t flags) {
         uint64_t FLAGS = VCPU_ENABLE_ACTIVE_WORK_STEALING |
                          VCPU_ENABLE_PASSIVE_WORK_STEALING;
@@ -2214,7 +2253,12 @@ insert_list:
         th->init_main_thread_stack();
         auto vcpu = new (ptr) vcpu_t(uint8_t(flags & FLAGS));
         vcpu->idle_worker = thread_create(&idler, nullptr);
+        if (unlikely(!vcpu->idle_worker)) {
+            vcpu_destroy(th, rq.pc, vcpu);
+            return -1;  // thread_create() has logged and set errno
+        }
         thread_enable_join(vcpu->idle_worker);
+        vcpu->go_online();      // publish only when fully initialized
         if_update_now(true);
         return ++_n_vcpu;
     }
@@ -2233,10 +2277,7 @@ insert_list:
         vcpu->state = states::DONE;  // instruct idle_worker to exit
         thread_join(vcpu->idle_worker);
         rq.current->state = states::DONE;
-        delete rq.current;
-        *rq.pc = nullptr;
-        vcpu->~vcpu_t();
-        free(vcpu);
+        vcpu_destroy(rq.current, rq.pc, vcpu);
         return --_n_vcpu;
     }
 
@@ -2248,11 +2289,40 @@ insert_list:
         CURRENT->stackful_free(ptr);
     }
 
+    int set_photon_thread_stack_allocator(StackAllocator allocator) {
+        // Single install path: the two hot-path delegates are extracted from
+        // the facade and assigned together, so they always come from the same
+        // allocator.
+        auto a = DUtils::get_func<DStackAlloc, void*(size_t)>(allocator);
+        auto d = DUtils::get_func<DStackDealloc, void(void*, size_t)>(allocator);
+        if (!a._func || !d._func)
+            LOG_ERROR_RETURN(EINVAL, -1, "stack allocator must provide both "
+                             "alloc() and dealloc()");
+        photon_thread_stack_allocator = allocator;
+        photon_thread_alloc = a;
+        photon_thread_dealloc = d;
+        return 0;
+    }
+
     void set_photon_thread_stack_allocator(
         Delegate<void *, size_t> _photon_thread_alloc,
         Delegate<void, void *, size_t> _photon_thread_dealloc) {
-        photon_thread_alloc = _photon_thread_alloc;
-        photon_thread_dealloc = _photon_thread_dealloc;
+        // Kept for compatibility: fold the two delegates into a facade and go
+        // through the same install path. Delegates binds a single object, so
+        // both must belong to the same one (they always do in practice: every
+        // allocator shipped with photon uses free functions).
+        StackAllocator sa;
+        if (!DUtils::bind_func_delegate<DStackAlloc, void*(size_t)>(
+                sa, _photon_thread_alloc) ||
+            !DUtils::bind_func_delegate<DStackDealloc, void(void*, size_t)>(
+                sa, _photon_thread_dealloc))
+            LOG_ERROR_RETURN(EINVAL, , "allocator and deallocator must belong "
+                             "to the same object");
+        set_photon_thread_stack_allocator(sa);
+    }
+
+    StackAllocator& get_photon_thread_stack_allocator() {
+        return photon_thread_stack_allocator;
     }
 
 }  // namespace photon
