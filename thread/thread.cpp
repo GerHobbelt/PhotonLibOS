@@ -290,7 +290,10 @@ namespace photon
         }
 
         void die() __attribute__((always_inline));
-        void dequeue_ready_atomic(states newstat = states::READY);
+        // `waitq_locked` tells that the caller is already holding this->waitq->lock,
+        // as photon::spinlock is NOT recursive
+        void dequeue_ready_atomic(states newstat = states::READY,
+                                  bool waitq_locked = false);
         vcpu_t* get_vcpu() {
             return (vcpu_t*)vcpu;
         }
@@ -727,12 +730,12 @@ namespace photon
         }
     };
 
-    inline void thread::dequeue_ready_atomic(states newstat)
+    inline void thread::dequeue_ready_atomic(states newstat, bool waitq_locked)
     {
         assert("this is not in runq, and this->lock is locked");
         if (waitq) {
             assert(waitq->front());
-            SCOPED_LOCK(waitq->lock);
+            SCOPED_LOCK(waitq->lock, (!waitq_locked) * 2);
             waitq->erase(this);
             waitq = nullptr;
         } else {
@@ -772,6 +775,9 @@ DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rdi_arg, void (*rsi_defer)(
 R"(
         push    %rbp
         mov     %rsp, (%rcx)
+        mov     (%rdx), %rsp
+        pop     %rbp
+        jmp     *%rsi
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
@@ -845,6 +851,9 @@ DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rcx_arg, void (*rdx_defer)(
 R"(
         push    %rbp
         mov     %rsp, (%r9)
+        mov     (%r8), %rsp
+        pop     %rbp
+        jmp     *%rdx
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rcx_arg, void (*rdx_defer)(void*), void** r8_to)
@@ -919,6 +928,10 @@ R"(
         stp x29, x30, [sp, #-16]!
         mov x29, sp
         str x29, [x3]
+        ldr x29, [x2]
+        mov sp, x29
+        ldp x29, x30, [sp], #16
+        br x1
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* x0_arg, void (*x1_defer)(void*), void** x2_to_th)
@@ -1462,7 +1475,8 @@ insert_list:
         return do_thread_usleep(timeout, rq);
     }
 
-    static void prelocked_thread_interrupt(thread* th, int error_number)
+    static void prelocked_thread_interrupt(thread* th, int error_number,
+                                           bool waitq_locked = false)
     {
         vcpu_t* vcpu = th->get_vcpu();
         assert(th && th->state == states::SLEEPING);
@@ -1471,10 +1485,10 @@ insert_list:
         th->error_number = error_number;
         RunQ rq;
         if (unlikely(!rq.current || vcpu != rq.current->get_vcpu())) {
-            th->dequeue_ready_atomic(states::STANDBY);
+            th->dequeue_ready_atomic(states::STANDBY, waitq_locked);
             vcpu->move_to_standbyq_atomic(th);
         } else {
-            th->dequeue_ready_atomic();
+            th->dequeue_ready_atomic(states::READY, waitq_locked);
             vcpu->sleepq.pop(th);
             AtomicRunQ(rq).insert_tail(th);
         }
@@ -1927,15 +1941,20 @@ insert_list:
         if (!q.th || !cnt || !m_ooo_resume)
             return;
         SCOPED_LOCK(q.lock);
-        for (auto th = q.th->next();
-                  th!= q.th && cnt;
-                  th = th->next()) {
-            SCOPED_LOCK(th->lock);
-            auto& c = th->semaphore_count;
-            if (c <= cnt) {
-                cnt -= c;
-                prelocked_thread_interrupt(th, -1);
+        for (auto th = q.th->next(); th != q.th && cnt; ) {
+            // resuming th erases it from the queue, making its own next
+            // point to itself, so remember the successor beforehand
+            auto next = th->next();
+            {
+                SCOPED_LOCK(th->lock);
+                auto& c = th->semaphore_count;
+                if (c <= cnt) {
+                    cnt -= c;
+                    // q.lock is held by us, and it is not recursive
+                    prelocked_thread_interrupt(th, -1, true);
+                }
             }
+            th = next;
         }
     }
     inline bool semaphore::try_subtract(uint64_t count) {
